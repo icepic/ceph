@@ -61,10 +61,17 @@ is a subset of the same information from the ``ceph fs dump`` command.
 
 ::
 
-    ceph fs set <file system name> <var> <val>
+    ceph fs set <file system name> <var> <val> [--yes-i-really-mean-it]
 
 Change a setting on a file system. These settings are specific to the named
-file system and do not affect other file systems.
+file system and do not affect other file systems. Confirmation flag is only
+needed for changing ``max_mds`` when cluster is unhealthy.
+
+.. note:: It is mandatory to pass confirmation flag (--yes--i-really-mean-it)
+   for modifying FS setting variable ``max_mds`` when cluster is unhealthy.
+   It has been added a precaution to tell users that modifying ``max_mds``
+   during troubleshooting or recovery might not help. Instead, it might
+   further destabilize the cluster.
 
 ::
 
@@ -279,6 +286,17 @@ Get metadata about the given MDS known to the Monitors.
 Mark the file system rank as repaired. Unlike the name suggests, this command
 does not change a MDS; it manipulates the file system rank which has been
 marked damaged.
+
+::
+
+    ceph mds last-seen <name>
+
+Learn the when the MDS named ``name`` was last in the FSMap. The JSON output
+includes the epoch the MDS was last seen. Historically information is limited by
+the following ``mon`` configuration:
+
+
+.. confval:: mon_fsmap_prune_threshold
 
 
 Required Client Features

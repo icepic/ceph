@@ -2,6 +2,17 @@
 ---
 
 options:
+- name: crimson_osd_objectstore
+  type: str
+  level: advanced
+  desc: backend type for a Crimson OSD (e.g seastore or bluestore)
+  default: bluestore
+  enum_values:
+  - bluestore
+  - seastore
+  - cyanstore
+  flags:
+  - create
 - name: crimson_osd_obc_lru_size
   type: uint
   level: advanced
@@ -31,6 +42,15 @@ options:
   desc: CPU cores on which alienstore threads will run in cpuset(7) format
   flags:
   - startup
+- name: crimson_seastar_num_threads
+  type: uint
+  level: advanced
+  default: 0
+  desc: The number of threads for serving seastar reactors without CPU pinning, overridden if crimson_seastar_cpu_cores is set
+  flags:
+  - startup
+  min: 0
+  max: 32
 - name: crimson_osd_stat_interval
   type: int
   level: advanced
@@ -96,8 +116,8 @@ options:
 - name: seastore_max_data_allocation_size
   type: size
   level: advanced
-  desc: Max size in bytes that an extent can be
-  default: 32_K
+  desc: Max size in bytes that an extent can be, 0 to disable
+  default: 0
 - name: seastore_cache_lru_size
   type: size
   level: advanced
@@ -145,3 +165,10 @@ options:
   level: dev
   desc: overwrite the existing data block based on delta if the overwrite size is equal to or less than the value, otherwise do overwrite based on remapping, set to 0 to enforce the remap-based overwrite.
   default: 0
+- name: seastore_disable_end_to_end_data_protection 
+  type: bool
+  level: dev
+  desc: When false, upon mkfs, try to discover whether the nvme device supports
+        internal checksum feature without using sever CPU then enable if available,
+        set to true to disable unconditionally.
+  default: true

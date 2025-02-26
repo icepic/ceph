@@ -12,13 +12,14 @@
  * 
  */
 
-
-#include "OSDMonitor.h"
-
 #include "FSCommands.h"
+#include "OSDMonitor.h"
 #include "MDSMonitor.h"
 #include "MgrStatMonitor.h"
 #include "mds/cephfs_features.h"
+#include "mds/FSMap.h"
+#include "osd/OSDMap.h"
+#include "common/strtol.h" // for strict_strtoll()
 
 using TOPNSPC::common::cmd_getval;
 
@@ -385,6 +386,17 @@ public:
       return -EINVAL;
     }
 
+    bool confirm = false;
+    cmd_getval(cmdmap, "yes_i_really_mean_it", confirm);
+    if (var == "max_mds" && !confirm && mon->mdsmon()->has_any_health_warning()) {
+      ss << "One or more file system health warnings are present. Modifying "
+	 << "the file system setting variable \"max_mds\" may not help "
+	 << "troubleshoot or recover from these warnings and may further "
+	 << "destabilize the system. If you really wish to proceed, run "
+	 << "again with --yes-i-really-mean-it";
+      return -EPERM;
+    }
+
     return set_val(mon, fsmap, op, cmdmap, ss, fsp->get_fscid(), var, val);
   }
 };
@@ -597,6 +609,11 @@ int FileSystemCommandHandler::set_val(Monitor *mon, FSMap& fsmap, MonOpRequestRe
       }
 
       ss << fsp->get_mds_map().get_fs_name();
+
+      if (!is_down && fsp->get_mds_map().get_max_mds() > 0) {
+        ss << " is already online";
+        return 0;
+      }
 
       modify_filesystem(fsmap, fsv,
           [is_down](auto&& fs)
@@ -1194,6 +1211,11 @@ class RemoveFilesystemHandler : public FileSystemCommandHandler
     }
 
     fsmap.erase_filesystem(fsp->get_fscid());
+
+    ss << "If there are active snapshot schedules associated with this "
+       << "file-system, you might see EIO errors in the mgr logs or at the "
+       << "snap-schedule command-line due to the missing file-system. "
+       << "However, these errors are transient and will get auto-resolved.";
 
     return 0;
   }

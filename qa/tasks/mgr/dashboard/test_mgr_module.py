@@ -4,9 +4,11 @@ from __future__ import absolute_import
 import logging
 
 import requests
+from urllib3.exceptions import MaxRetryError
 
 from .helper import (DashboardTestCase, JLeaf, JList, JObj,
-                     module_options_object_schema, module_options_schema)
+                     module_options_object_schema, module_options_schema,
+                     retry)
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +16,7 @@ logger = logging.getLogger(__name__)
 class MgrModuleTestCase(DashboardTestCase):
     MGRS_REQUIRED = 1
 
+    @retry(on_exception=RuntimeError, tries=2, delay=0.5, logger=logger)
     def wait_until_rest_api_accessible(self):
         """
         Wait until the REST API is accessible.
@@ -22,10 +25,11 @@ class MgrModuleTestCase(DashboardTestCase):
         def _check_connection():
             try:
                 # Try reaching an API endpoint successfully.
+                logger.info('Trying to reach the REST API endpoint')
                 self._get('/api/mgr/module')
                 if self._resp.status_code == 200:
                     return True
-            except requests.ConnectionError:
+            except (MaxRetryError, requests.ConnectionError):
                 pass
             return False
 

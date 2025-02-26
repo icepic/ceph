@@ -49,7 +49,7 @@ void LogMissingRequest::dump_detail(Formatter *f) const
 ConnectionPipeline &LogMissingRequest::get_connection_pipeline()
 {
   return get_osd_priv(&get_local_connection()
-         ).client_request_conn_pipeline;
+         ).replicated_request_conn_pipeline;
 }
 
 PerShardPipeline &LogMissingRequest::get_pershard_pipeline(
@@ -58,9 +58,9 @@ PerShardPipeline &LogMissingRequest::get_pershard_pipeline(
   return shard_services.get_replicated_request_pipeline();
 }
 
-ClientRequest::PGPipeline &LogMissingRequest::client_pp(PG &pg)
+PGRepopPipeline &LogMissingRequest::repop_pipeline(PG &pg)
 {
-  return pg.request_pg_pipeline;
+  return pg.repop_pipeline;
 }
 
 seastar::future<> LogMissingRequest::with_pg(
@@ -73,7 +73,7 @@ seastar::future<> LogMissingRequest::with_pg(
   return interruptor::with_interruption([this, pg] {
     LOG_PREFIX(LogMissingRequest::with_pg);
     DEBUGI("{}: pg present", *this);
-    return this->template enter_stage<interruptor>(client_pp(*pg).await_map
+    return this->template enter_stage<interruptor>(repop_pipeline(*pg).process
     ).then_interruptible([this, pg] {
       return this->template with_blocking_event<
         PG_OSDMapGate::OSDMapBlocker::BlockingEvent
@@ -89,7 +89,7 @@ seastar::future<> LogMissingRequest::with_pg(
     });
   }, [](std::exception_ptr) {
     return seastar::now();
-  }, pg).finally([this, ref=std::move(ref)] {
+  }, pg, pg->get_osdmap_epoch()).finally([this, ref=std::move(ref)] {
     logger().debug("{}: exit", *this);
     handle.exit();
   });

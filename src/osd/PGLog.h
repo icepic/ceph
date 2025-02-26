@@ -22,6 +22,7 @@
 #include "osd_types.h"
 #include "os/ObjectStore.h"
 #include <list>
+#include <unordered_map>
 
 #ifdef WITH_SEASTAR
 #include <seastar/core/future.hh>
@@ -146,10 +147,10 @@ public:
    * plus some methods to manipulate it all.
    */
   struct IndexedLog : public pg_log_t {
-    mutable ceph::unordered_map<hobject_t,pg_log_entry_t*> objects;  // ptrs into log.  be careful!
-    mutable ceph::unordered_map<osd_reqid_t,pg_log_entry_t*> caller_ops;
-    mutable ceph::unordered_multimap<osd_reqid_t,pg_log_entry_t*> extra_caller_ops;
-    mutable ceph::unordered_map<osd_reqid_t,pg_log_dup_t*> dup_index;
+    mutable std::unordered_map<hobject_t, pg_log_entry_t*> objects;  // ptrs into log.  be careful!
+    mutable std::unordered_map<osd_reqid_t, pg_log_entry_t*> caller_ops;
+    mutable std::unordered_multimap<osd_reqid_t, pg_log_entry_t*> extra_caller_ops;
+    mutable std::unordered_map<osd_reqid_t, pg_log_dup_t*> dup_index;
 
     // recovery pointers
     std::list<pg_log_entry_t>::iterator complete_to; // not inclusive of referenced item
@@ -942,13 +943,6 @@ public:
   void rebuild_missing_set_with_deletes(ObjectStore *store,
 					ObjectStore::CollectionHandle& ch,
 					const pg_info_t &info);
-
-#ifdef WITH_SEASTAR
-  seastar::future<> rebuild_missing_set_with_deletes_crimson(
-    crimson::os::FuturizedStore::Shard &store,
-    crimson::os::CollectionRef ch,
-    const pg_info_t &info);
-#endif
 
 protected:
   static void split_by_object(

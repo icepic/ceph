@@ -47,23 +47,30 @@ SegmentedOolWriter::write_record(
   stats.md_bytes += record.size.get_raw_mdlength();
   stats.num_records += 1;
 
-  return record_submitter.submit(
+  auto ret = record_submitter.submit(
     std::move(record),
-    with_atomic_roll_segment
-  ).safe_then([this, FNAME, &t, extents=std::move(extents)
-              ](record_locator_t ret) mutable {
-    DEBUGT("{} finish with {} and {} extents",
+    with_atomic_roll_segment);
+  DEBUGT("{} start at {} with {} extents ...",
+         t, segment_allocator.get_name(),
+         ret.record_base_regardless_md,
+         extents.size());
+  paddr_t extent_addr = ret.record_base_regardless_md.offset;
+  for (auto& extent : extents) {
+    TRACET("{} extent will be written at {} -- {}",
            t, segment_allocator.get_name(),
-           ret, extents.size());
-    paddr_t extent_addr = ret.record_block_base;
-    for (auto& extent : extents) {
-      TRACET("{} ool extent written at {} -- {}",
-             t, segment_allocator.get_name(),
-             extent_addr, *extent);
-      t.update_delayed_ool_extent_addr(extent, extent_addr);
-      extent_addr = extent_addr.as_seg_paddr().add_offset(
-          extent->get_length());
-    }
+           extent_addr, *extent);
+    t.update_delayed_ool_extent_addr(extent, extent_addr);
+    extent_addr = extent_addr.as_seg_paddr().add_offset(
+        extent->get_length());
+  }
+  return std::move(ret.future
+  ).safe_then([this, FNAME, &t,
+               record_base=ret.record_base_regardless_md
+              ](record_locator_t ret) {
+    TRACET("{} finish {}=={}",
+           t, segment_allocator.get_name(), ret, record_base);
+    // ool won't write metadata, so the paddrs must be equal
+    assert(ret.record_block_base == record_base.offset);
   });
 }
 
@@ -84,7 +91,7 @@ SegmentedOolWriter::do_write(
       return do_write(t, extents);
     });
   }
-  record_t record(TRANSACTION_TYPE_NULL);
+  record_t record(record_type_t::OOL, t.get_src());
   std::list<LogicalCachedExtentRef> pending_extents;
   auto commit_time = seastar::lowres_system_clock::now();
 
@@ -191,12 +198,12 @@ void ExtentPlacementManager::init(
     dynamic_max_rewrite_generation = MAX_REWRITE_GENERATION;
   }
 
-  if (trimmer->get_journal_type() == journal_type_t::SEGMENTED) {
+  if (trimmer->get_backend_type() == backend_type_t::SEGMENTED) {
     auto segment_cleaner = dynamic_cast<SegmentCleaner*>(cleaner.get());
     ceph_assert(segment_cleaner != nullptr);
     auto num_writers = generation_to_writer(dynamic_max_rewrite_generation + 1);
 
-    data_writers_by_gen.resize(num_writers, {});
+    data_writers_by_gen.resize(num_writers, nullptr);
     for (rewrite_gen_t gen = OOL_GENERATION; gen < MIN_COLD_GENERATION; ++gen) {
       writer_refs.emplace_back(std::make_unique<SegmentedOolWriter>(
 	    data_category_t::DATA, gen, *segment_cleaner,
@@ -217,11 +224,11 @@ void ExtentPlacementManager::init(
       add_device(device);
     }
   } else {
-    assert(trimmer->get_journal_type() == journal_type_t::RANDOM_BLOCK);
+    assert(trimmer->get_backend_type() == backend_type_t::RANDOM_BLOCK);
     auto rb_cleaner = dynamic_cast<RBMCleaner*>(cleaner.get());
     ceph_assert(rb_cleaner != nullptr);
     auto num_writers = generation_to_writer(dynamic_max_rewrite_generation + 1);
-    data_writers_by_gen.resize(num_writers, {});
+    data_writers_by_gen.resize(num_writers, nullptr);
     md_writers_by_gen.resize(num_writers, {});
     writer_refs.emplace_back(std::make_unique<RandomBlockOolWriter>(
 	    rb_cleaner));
@@ -268,6 +275,153 @@ void ExtentPlacementManager::set_primary_device(Device *device)
   ceph_assert(primary_device == nullptr);
   primary_device = device;
   ceph_assert(devices_by_id[device->get_device_id()] == device);
+}
+
+device_stats_t
+ExtentPlacementManager::get_device_stats(
+  const writer_stats_t &journal_stats,
+  bool report_detail,
+  double seconds) const
+{
+  LOG_PREFIX(ExtentPlacementManager::get_device_stats);
+
+  /*
+   * RecordSubmitter::get_stats() isn't reentrant.
+   * And refer to EPM::init() for the writers.
+   */
+
+  writer_stats_t main_stats = journal_stats;
+  std::vector<writer_stats_t> main_writer_stats;
+  using enum data_category_t;
+  if (get_main_backend_type() == backend_type_t::SEGMENTED) {
+    // 0. oolmdat
+    main_writer_stats.emplace_back(
+        get_writer(METADATA, OOL_GENERATION)->get_stats());
+    main_stats.add(main_writer_stats.back());
+    // 1. ooldata
+    main_writer_stats.emplace_back(
+        get_writer(DATA, OOL_GENERATION)->get_stats());
+    main_stats.add(main_writer_stats.back());
+    // 2. mainmdat
+    main_writer_stats.emplace_back();
+    for (rewrite_gen_t gen = MIN_REWRITE_GENERATION; gen < MIN_COLD_GENERATION; ++gen) {
+      const auto &writer = get_writer(METADATA, gen);
+      ceph_assert(writer->get_type() == backend_type_t::SEGMENTED);
+      main_writer_stats.back().add(writer->get_stats());
+    }
+    main_stats.add(main_writer_stats.back());
+    // 3. maindata
+    main_writer_stats.emplace_back();
+    for (rewrite_gen_t gen = MIN_REWRITE_GENERATION; gen < MIN_COLD_GENERATION; ++gen) {
+      const auto &writer = get_writer(DATA, gen);
+      ceph_assert(writer->get_type() == backend_type_t::SEGMENTED);
+      main_writer_stats.back().add(writer->get_stats());
+    }
+    main_stats.add(main_writer_stats.back());
+  } else { // RBM
+    ceph_assert(get_main_backend_type() == backend_type_t::RANDOM_BLOCK);
+    // In RBM, md_writer and data_wrtier share a single writer, so we only register
+    // md_writer's writer here.
+    main_writer_stats.emplace_back(
+        get_writer(METADATA, OOL_GENERATION)->get_stats());
+    main_stats.add(main_writer_stats.back());
+  }
+
+  writer_stats_t cold_stats = {};
+  std::vector<writer_stats_t> cold_writer_stats;
+  bool has_cold_tier = background_process.has_cold_tier();
+  if (has_cold_tier) {
+    // 0. coldmdat
+    cold_writer_stats.emplace_back();
+    for (rewrite_gen_t gen = MIN_COLD_GENERATION; gen < REWRITE_GENERATIONS; ++gen) {
+      const auto &writer = get_writer(METADATA, gen);
+      ceph_assert(writer->get_type() == backend_type_t::SEGMENTED);
+      cold_writer_stats.back().add(writer->get_stats());
+    }
+    cold_stats.add(cold_writer_stats.back());
+    // 1. colddata
+    cold_writer_stats.emplace_back();
+    for (rewrite_gen_t gen = MIN_COLD_GENERATION; gen < REWRITE_GENERATIONS; ++gen) {
+      const auto &writer = get_writer(DATA, gen);
+      ceph_assert(writer->get_type() == backend_type_t::SEGMENTED);
+      cold_writer_stats.back().add(writer->get_stats());
+    }
+    cold_stats.add(cold_writer_stats.back());
+  }
+
+  if (report_detail && seconds != 0) {
+    std::ostringstream oss;
+    auto report_writer_stats = [seconds, &oss](
+        const char* name,
+        const writer_stats_t& stats) {
+      oss << "\n" << name << ": " << writer_stats_printer_t{seconds, stats};
+    };
+    report_writer_stats("tier-main", main_stats);
+    report_writer_stats("  inline", journal_stats);
+    if (get_main_backend_type() == backend_type_t::SEGMENTED) {
+      report_writer_stats("  oolmdat", main_writer_stats[0]);
+      report_writer_stats("  ooldata", main_writer_stats[1]);
+      report_writer_stats("  mainmdat", main_writer_stats[2]);
+      report_writer_stats("  maindata", main_writer_stats[3]);
+    } else { // RBM
+      report_writer_stats("  ool", main_writer_stats[0]);
+    }
+    if (has_cold_tier) {
+      report_writer_stats("tier-cold", cold_stats);
+      report_writer_stats("  coldmdat", cold_writer_stats[0]);
+      report_writer_stats("  colddata", cold_writer_stats[1]);
+    }
+
+    auto report_by_src = [seconds, has_cold_tier, &oss,
+                          &journal_stats,
+                          &main_writer_stats,
+                          &cold_writer_stats](transaction_type_t src) {
+      auto t_stats = get_by_src(journal_stats.stats_by_src, src);
+      for (const auto &writer_stats : main_writer_stats) {
+        t_stats += get_by_src(writer_stats.stats_by_src, src);
+      }
+      for (const auto &writer_stats : cold_writer_stats) {
+        t_stats += get_by_src(writer_stats.stats_by_src, src);
+      }
+      if (src == transaction_type_t::READ) {
+        ceph_assert(t_stats.is_empty());
+        return;
+      }
+      oss << "\n" << src << ": "
+          << tw_stats_printer_t{seconds, t_stats};
+
+      auto report_tw_stats = [seconds, src, &oss](
+          const char* name,
+          const writer_stats_t& stats) {
+        const auto& tw_stats = get_by_src(stats.stats_by_src, src);
+        if (tw_stats.is_empty()) {
+          return;
+        }
+        oss << "\n  " << name << ": "
+            << tw_stats_printer_t{seconds, tw_stats};
+      };
+      report_tw_stats("inline", journal_stats);
+      report_tw_stats("oolmdat", main_writer_stats[0]);
+      report_tw_stats("ooldata", main_writer_stats[1]);
+      report_tw_stats("mainmdat", main_writer_stats[2]);
+      report_tw_stats("maindata", main_writer_stats[3]);
+      if (has_cold_tier) {
+        report_tw_stats("coldmdat", cold_writer_stats[0]);
+        report_tw_stats("colddata", cold_writer_stats[1]);
+      }
+    };
+    for (uint8_t _src=0; _src<TRANSACTION_TYPE_MAX; ++_src) {
+      auto src = static_cast<transaction_type_t>(_src);
+      report_by_src(src);
+    }
+
+    INFO("{}", oss.str());
+  }
+
+  main_stats.add(cold_stats);
+  return {main_stats.io_depth_stats.num_io,
+          main_stats.io_depth_stats.num_io_grouped,
+          main_stats.get_total_bytes()};
 }
 
 ExtentPlacementManager::open_ertr::future<>
@@ -343,6 +497,7 @@ ExtentPlacementManager::write_delayed_ool_extents(
       assert(extent->is_valid());
     });
 #endif
+    assert(writer->get_type() == backend_type_t::SEGMENTED);
     return writer->alloc_write_ool_extents(t, extents);
   });
 }
@@ -369,6 +524,7 @@ ExtentPlacementManager::write_preallocated_ool_extents(
     return trans_intr::do_for_each(alloc_map, [&t](auto& p) {
       auto writer = p.first;
       auto& extents = p.second;
+      assert(writer->get_type() == backend_type_t::RANDOM_BLOCK);
       return writer->alloc_write_ool_extents(t, extents);
     });
   });
@@ -831,7 +987,19 @@ RandomBlockOolWriter::alloc_write_ool_extents(
     return alloc_write_iertr::now();
   }
   return seastar::with_gate(write_guard, [this, &t, &extents] {
-    return do_write(t, extents);
+    seastar::lw_shared_ptr<rbm_pending_ool_t> ptr =
+      seastar::make_lw_shared<rbm_pending_ool_t>();
+    ptr->pending_extents = t.get_pre_alloc_list();
+    assert(!t.is_conflicted());
+    t.set_pending_ool(ptr);
+    return do_write(t, extents
+    ).finally([this, ptr=ptr] {
+      if (ptr->is_conflicted) {
+	for (auto &e : ptr->pending_extents) {
+	  rb_cleaner->mark_space_free(e->get_paddr(), e->get_length());
+	}
+      }
+    });
   });
 }
 
@@ -844,55 +1012,102 @@ RandomBlockOolWriter::do_write(
   assert(!extents.empty());
   DEBUGT("start with {} allocated extents",
          t, extents.size());
-  return trans_intr::do_for_each(extents,
-    [this, &t, FNAME](auto& ex) {
+  std::vector<write_info_t> writes;
+  for (auto& ex : extents) {
     auto paddr = ex->get_paddr();
     assert(paddr.is_absolute());
     RandomBlockManager * rbm = rb_cleaner->get_rbm(paddr); 
     assert(rbm);
-    TRACE("extent {}, allocated addr {}", fmt::ptr(ex.get()), paddr);
+    TRACE("write extent {}, paddr {} ...",
+          fmt::ptr(ex.get()), paddr);
     auto& stats = t.get_ool_write_stats();
     stats.extents.num += 1;
     stats.extents.bytes += ex->get_length();
-    stats.num_records += 1;
-
     ex->prepare_write();
-    extent_len_t offset = 0;
+
     bufferptr bp;
     if (can_inplace_rewrite(t, ex)) {
       assert(ex->is_logical());
       auto r = ex->template cast<LogicalCachedExtent>()->get_modified_region();
       ceph_assert(r.has_value());
-      offset = p2align(r->offset, rbm->get_block_size());
+      extent_len_t offset = p2align(r->offset, rbm->get_block_size());
       extent_len_t len =
 	p2roundup(r->offset + r->len, rbm->get_block_size()) - offset;
       bp = ceph::bufferptr(ex->get_bptr(), offset, len);
+      paddr = ex->get_paddr() + offset;
     } else {
       bp = ex->get_bptr();
+      auto& trans_stats = get_by_src(w_stats.stats_by_src, t.get_src());
+      trans_stats.data_bytes += ex->get_length();
+      w_stats.data_bytes += ex->get_length();
     }
-    return trans_intr::make_interruptible(
-      rbm->write(paddr + offset,
-	bp
-      ).handle_error(
-	alloc_write_iertr::pass_further{},
-	crimson::ct_error::assert_all{
-	  "Invalid error when writing record"}
-      )
-    ).si_then([this, &t, &ex, paddr, FNAME] {
-      TRACET("ool extent written at {} -- {}",
-	     t, paddr, *ex);
-      if (ex->is_initial_pending()) {
-	t.mark_allocated_extent_ool(ex);
-      } else if (can_inplace_rewrite(t, ex)) {
-        assert(ex->is_logical());
-	t.mark_inplace_rewrite_extent_ool(
-          ex->template cast<LogicalCachedExtent>());
-      } else {
-	ceph_assert("impossible");
+
+    if (ex->is_initial_pending()) {
+      t.mark_allocated_extent_ool(ex);
+    } else if (can_inplace_rewrite(t, ex)) {
+      assert(ex->is_logical());
+      t.mark_inplace_rewrite_extent_ool(
+        ex->template cast<LogicalCachedExtent>());
+    } else {
+      ceph_assert("impossible");
+    }
+
+    // TODO : allocate a consecutive address based on a transaction
+    if (writes.size() != 0 &&
+        writes.back().offset + writes.back().bp.length() == paddr) {
+      // We can write both the currrent extent and the previous one at once
+      // if the extents are located in a row
+      if (writes.back().mergeable_bps.size() == 0) {
+	 writes.back().mergeable_bps.push_back(writes.back().bp);
       }
-      return alloc_write_iertr::now();
-    });
-  });
+      writes.back().mergeable_bps.push_back(ex->get_bptr());
+    } else {
+      // Write a single extent in the existing way
+      write_info_t w_info;
+      w_info.offset = paddr;
+      w_info.rbm = rbm;
+      w_info.bp = bp;
+      writes.push_back(w_info);
+    }
+    TRACE("current extent: {}~0x{:x},\
+      maybe-merged current extent: {}~0x{:x}",
+      paddr, ex->get_length(), writes.back().offset, writes.back().bp.length());
+  }
+
+  for (auto &w : writes) {
+    if (w.mergeable_bps.size() > 0) {
+      extent_len_t len = 0;
+      for (auto &b : w.mergeable_bps) {
+	len += b.length();
+      }
+      w.bp = ceph::bufferptr(ceph::buffer::create_page_aligned(len));
+      extent_len_t cursor = 0;
+      for (auto &b : w.mergeable_bps) {
+	w.bp.copy_in(cursor, b.length(), b.c_str());
+	cursor += b.length();
+      }
+      w.mergeable_bps.clear();
+    }
+  }
+
+  return trans_intr::make_interruptible(
+    seastar::do_with(std::move(writes),
+      [&t, this](auto& writes) {
+      auto& stats = t.get_ool_write_stats();
+      stats.num_records += writes.size();
+      auto& trans_stats = get_by_src(w_stats.stats_by_src, t.get_src());
+      trans_stats.num_records += writes.size();
+      return crimson::do_for_each(writes,
+        [](auto& info) {
+        return info.rbm->write(info.offset, info.bp
+        ).handle_error(
+          alloc_write_ertr::pass_further{},
+          crimson::ct_error::assert_all{
+            "Invalid error when writing record"}
+        );
+      });
+    })
+  );
 }
 
 }

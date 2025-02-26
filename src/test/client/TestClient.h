@@ -20,6 +20,7 @@
 #include "msg/Messenger.h"
 #include "mon/MonClient.h"
 #include "osdc/ObjectCacher.h"
+#include "osdc/Objecter.h"
 #include "client/MetaRequest.h"
 #include "client/Client.h"
 #include "messages/MClientReclaim.h"
@@ -39,7 +40,7 @@ public:
     int check_dummy_op(const UserPerm& perms){
       RWRef_t mref_reader(mount_state, CLIENT_MOUNTING);
       if (!mref_reader.is_state_satisfied()) {
-        return -CEPHFS_ENOTCONN;
+        return -ENOTCONN;
       }
       std::scoped_lock l(client_lock);
       MetaRequest *req = new MetaRequest(CEPH_MDS_OP_DUMMY);
@@ -50,7 +51,7 @@ public:
     int send_unknown_session_op(int op) {
       RWRef_t mref_reader(mount_state, CLIENT_MOUNTING);
       if (!mref_reader.is_state_satisfied()) {
-        return -CEPHFS_ENOTCONN;
+        return -ENOTCONN;
       }
       std::scoped_lock l(client_lock);
       auto session = _get_or_open_mds_session(0);
@@ -62,7 +63,7 @@ public:
     bool check_client_blocklisted() {
       RWRef_t mref_reader(mount_state, CLIENT_MOUNTING);
       if (!mref_reader.is_state_satisfied()) {
-        return -CEPHFS_ENOTCONN;
+        return -ENOTCONN;
       }
       std::scoped_lock l(client_lock);
       bs::error_code ec;
@@ -75,7 +76,7 @@ public:
     bool check_unknown_reclaim_flag(uint32_t flag) {
       RWRef_t mref_reader(mount_state, CLIENT_MOUNTING);
       if (!mref_reader.is_state_satisfied()) {
-        return -CEPHFS_ENOTCONN;
+        return -ENOTCONN;
       }
       std::scoped_lock l(client_lock);
       char uuid[256];

@@ -67,6 +67,10 @@ $theme-colors: (
   'dark': $dark
 ) !default;
 
+// Button colors
+$btn-primary-hover: #1f6f79 !default;
+$btn-primary-active: #1e6872 !default;
+
 // Body
 $body-color-bright: $light !default;
 $body-bg: $white !default;
@@ -110,8 +114,9 @@ $code-block-bg: #f7f7f9 !default;
 
 // Typography
 
-$font-family-sans-serif: 'Helvetica Neue', Helvetica, Arial, 'Noto Sans', sans-serif,
-  'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji' !default;
+// WARNING: This was clashing with Carbon's font-family
+// $font-family-sans-serif: 'Helvetica Neue', Helvetica, Arial, 'Noto Sans', sans-serif,
+//   'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji' !default;
 
 // Card
 

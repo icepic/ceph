@@ -236,9 +236,14 @@ class RbdTest(DashboardTestCase):
             'features_name': JList(JLeaf(str)),
             'stripe_count': JLeaf(int, none=True),
             'stripe_unit': JLeaf(int, none=True),
-            'parent': JObj(sub_elems={'pool_name': JLeaf(str),
+            'parent': JObj(sub_elems={'pool_id': JLeaf(int),
+                                      'pool_name': JLeaf(str),
                                       'pool_namespace': JLeaf(str, none=True),
+                                      'image_id': JLeaf(str),
                                       'image_name': JLeaf(str),
+                                      'trash': JLeaf(bool),
+                                      'snap_id': JLeaf(int),
+                                      'snap_namespace_type': JLeaf(int),
                                       'snap_name': JLeaf(str)}, none=True),
             'data_pool': JLeaf(str, none=True),
             'snapshots': JList(JLeaf(dict)),
@@ -256,7 +261,12 @@ class RbdTest(DashboardTestCase):
         self.assertSchema(img, schema)
 
         for k, v in kwargs.items():
-            if isinstance(v, list):
+            if k == 'parent' and v is not None:
+                # check that img['parent'] contains (is a superset of) v
+                actual = {pk: img['parent'][pk]
+                          for pk in v.keys() if pk in img['parent']}
+                self.assertEqual(actual, v)
+            elif isinstance(v, list):
                 self.assertSetEqual(set(img[k]), set(v))
             else:
                 self.assertEqual(img[k], v)
@@ -859,7 +869,19 @@ class RbdTest(DashboardTestCase):
         self.assertEqual(clone_format_version, 2)
         self.assertStatus(200)
 
+        # if empty list is sent, then the config will remain as it is
         value = []
+        res = [{'section': "global", 'value': "2"}]
+        self._post('/api/cluster_conf', {
+            'name': config_name,
+            'value': value
+        })
+        self.wait_until_equal(
+            lambda: _get_config_by_name(config_name),
+            res,
+            timeout=60)
+
+        value = [{'section': "global", 'value': ""}]
         self._post('/api/cluster_conf', {
             'name': config_name,
             'value': value

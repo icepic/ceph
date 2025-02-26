@@ -26,10 +26,14 @@ namespace crimson::mgr
 {
 
 Client::Client(crimson::net::Messenger& msgr,
-                 WithStats& with_stats)
+	       WithStats& with_stats,
+	       set_perf_queries_cb_t cb_set,
+	       get_perf_report_cb_t cb_get)
   : msgr{msgr},
     with_stats{with_stats},
-    report_timer{[this] {report();}}
+    report_timer{[this] {report();}},
+    set_perf_queries_cb(cb_set),
+    get_perf_report_cb(cb_get)
 {}
 
 seastar::future<> Client::start()
@@ -41,7 +45,7 @@ seastar::future<> Client::stop()
 {
   logger().info("{}", __func__);
   report_timer.cancel();
-  auto fut = gate.close();
+  auto fut = gates.close_all();
   if (conn) {
     conn->mark_down();
   }
@@ -52,7 +56,7 @@ std::optional<seastar::future<>>
 Client::ms_dispatch(crimson::net::ConnectionRef conn, MessageRef m)
 {
   bool dispatched = true;
-  gate.dispatch_in_background(__func__, *this, [this, conn, &m, &dispatched] {
+  gates.dispatch_in_background(__func__, *this, [this, conn, &m, &dispatched] {
     switch(m->get_type()) {
     case MSG_MGR_MAP:
       return handle_mgr_map(conn, boost::static_pointer_cast<MMgrMap>(m));
@@ -71,7 +75,7 @@ void Client::ms_handle_connect(
     seastar::shard_id prv_shard)
 {
   ceph_assert_always(prv_shard == seastar::this_shard_id());
-  gate.dispatch_in_background(__func__, *this, [this, c] {
+  gates.dispatch_in_background(__func__, *this, [this, c] {
     if (conn == c) {
       // ask for the mgrconfigure message
       auto m = crimson::make_message<MMgrOpen>();
@@ -87,7 +91,7 @@ void Client::ms_handle_connect(
 
 void Client::ms_handle_reset(crimson::net::ConnectionRef c, bool /* is_replace */)
 {
-  gate.dispatch_in_background(__func__, *this, [this, c] {
+  gates.dispatch_in_background(__func__, *this, [this, c] {
     if (conn == c) {
       report_timer.cancel();
       return reconnect();
@@ -152,29 +156,40 @@ seastar::future<> Client::handle_mgr_conf(crimson::net::ConnectionRef,
   } else {
     report_timer.cancel();
   }
+  if (!m->osd_perf_metric_queries.empty()) {
+    ceph_assert(set_perf_queries_cb);
+    return set_perf_queries_cb(m->osd_perf_metric_queries);
+  }
   return seastar::now();
 }
 
 void Client::report()
 {
   _send_report();
-  gate.dispatch_in_background(__func__, *this, [this] {
+  gates.dispatch_in_background(__func__, *this, [this] {
     if (!conn) {
       logger().warn("report: no conn available; report skipped");
       return seastar::now();
     }
     return with_stats.get_stats(
     ).then([this](auto &&pg_stats) {
+      if (!conn) {
+        logger().warn("report: no conn available; before sending stats, report skipped");
+        return seastar::now();
+      }
       return conn->send(std::move(pg_stats));
     });
   });
 }
 
+void Client::update_daemon_health(std::vector<DaemonHealthMetric>&& metrics)
+{
+  daemon_health_metrics = std::move(metrics);
+}
+
 void Client::_send_report()
 {
-  // TODO: implement daemon_health_metrics support
-  // https://tracker.ceph.com/issues/63766
-  gate.dispatch_in_background(__func__, *this, [this] {
+  gates.dispatch_in_background(__func__, *this, [this] {
     if (!conn) {
       logger().warn("cannot send report; no conn available");
       return seastar::now();
@@ -192,8 +207,16 @@ void Client::_send_report()
       report->daemon_name = local_conf()->name.get_id();
     }
     report->service_name = service_name;
+    report->daemon_health_metrics = std::move(daemon_health_metrics);
     local_conf().get_config_bl(last_config_bl_version, &report->config_bl,
 	                      &last_config_bl_version);
+    if (get_perf_report_cb) {
+      return get_perf_report_cb(
+      ).then([report=std::move(report), this](auto payload) mutable {
+	report->metric_report_message = MetricReportMessage(std::move(payload));
+	return conn->send(std::move(report));
+      });
+    }
     return conn->send(std::move(report));
   });
 }

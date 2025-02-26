@@ -8,16 +8,17 @@
 #include <boost/intrusive/list.hpp>
 
 #include "crimson/common/log.h"
+#include "crimson/os/seastore/backref_entry.h"
+#include "crimson/os/seastore/cached_extent.h"
 #include "crimson/os/seastore/logging.h"
 #include "crimson/os/seastore/ordering_handle.h"
-#include "crimson/os/seastore/seastore_types.h"
-#include "crimson/os/seastore/cached_extent.h"
 #include "crimson/os/seastore/root_block.h"
+#include "crimson/os/seastore/seastore_types.h"
+#include "crimson/os/seastore/transaction_interruptor.h"
 
 namespace crimson::os::seastore {
 
 class SeaStore;
-class Transaction;
 
 struct io_stat_t {
   uint64_t num = 0;
@@ -41,23 +42,48 @@ inline std::ostream& operator<<(std::ostream& out, const io_stat_t& stat) {
   return out << stat.num << "(" << stat.bytes << "B)";
 }
 
-struct version_stat_t {
-  uint64_t num = 0;
-  uint64_t version = 0;
+struct rewrite_stats_t {
+  uint64_t num_n_dirty = 0;
+  uint64_t num_dirty = 0;
+  uint64_t dirty_version = 0;
 
   bool is_clear() const {
-    return (num == 0 && version == 0);
+    return (num_n_dirty == 0 && num_dirty == 0);
   }
 
-  void increment(extent_version_t v) {
-    ++num;
-    version += v;
+  uint64_t get_num_rewrites() const {
+    return num_n_dirty + num_dirty;
   }
 
-  void increment_stat(const version_stat_t& stat) {
-    num += stat.num;
-    version += stat.version;
+  double get_avg_version() const {
+    return static_cast<double>(dirty_version)/num_dirty;
   }
+
+  void account_n_dirty() {
+    ++num_n_dirty;
+  }
+
+  void account_dirty(extent_version_t v) {
+    ++num_dirty;
+    dirty_version += v;
+  }
+
+  void add(const rewrite_stats_t& o) {
+    num_n_dirty += o.num_n_dirty;
+    num_dirty += o.num_dirty;
+    dirty_version += o.dirty_version;
+  }
+
+  void minus(const rewrite_stats_t& o) {
+    num_n_dirty -= o.num_n_dirty;
+    num_dirty -= o.num_dirty;
+    dirty_version -= o.dirty_version;
+  }
+};
+
+struct rbm_pending_ool_t {
+  bool is_conflicted = false;
+  std::list<CachedExtentRef> pending_extents;
 };
 
 /**
@@ -92,7 +118,7 @@ public:
 	*out = CachedExtentRef(&*iter);
       SUBTRACET(seastore_cache, "{} is present in write_set -- {}",
                 *this, addr, *iter);
-      assert((*out)->is_valid());
+      assert(!out || (*out)->is_valid());
       return get_extent_ret::PRESENT;
     } else if (retired_set.count(addr)) {
       return get_extent_ret::RETIRED;
@@ -101,7 +127,7 @@ public:
       iter != read_set.end()) {
       // placeholder in read-set should be in the retired-set
       // at the same time.
-      assert(iter->ref->get_type() != extent_types_t::RETIRED_PLACEHOLDER);
+      assert(!is_retired_placeholder_type(iter->ref->get_type()));
       if (out)
 	*out = iter->ref;
       SUBTRACET(seastore_cache, "{} is present in read_set -- {}",
@@ -126,25 +152,48 @@ public:
       ref->set_invalid(*this);
       write_set.erase(*ref);
       assert(ref->prior_instance);
-      retired_set.insert(ref->prior_instance);
+      retired_set.emplace(ref->prior_instance, trans_id);
       assert(read_set.count(ref->prior_instance->get_paddr()));
       ref->prior_instance.reset();
     } else {
       // && retired_set.count(ref->get_paddr()) == 0
       // If it's already in the set, insert here will be a noop,
       // which is what we want.
-      retired_set.insert(ref);
+      retired_set.emplace(ref, trans_id);
     }
   }
 
-  void add_to_read_set(CachedExtentRef ref) {
-    if (is_weak()) return;
+  // Returns true if added, false if already added or weak
+  bool maybe_add_to_read_set(CachedExtentRef ref) {
+    if (is_weak()) {
+      return false;
+    }
 
     assert(ref->is_valid());
 
     auto it = ref->transactions.lower_bound(
       this, read_set_item_t<Transaction>::trans_cmp_t());
-    if (it != ref->transactions.end() && it->t == this) return;
+    if (it != ref->transactions.end() && it->t == this) {
+      return false;
+    }
+
+    auto [iter, inserted] = read_set.emplace(this, ref);
+    ceph_assert(inserted);
+    ref->transactions.insert_before(
+      it, const_cast<read_set_item_t<Transaction>&>(*iter));
+    return true;
+  }
+
+  void add_to_read_set(CachedExtentRef ref) {
+    if (is_weak()) {
+      return;
+    }
+
+    assert(ref->is_valid());
+
+    auto it = ref->transactions.lower_bound(
+      this, read_set_item_t<Transaction>::trans_cmp_t());
+    assert(it == ref->transactions.end() || it->t != this);
 
     auto [iter, inserted] = read_set.emplace(this, ref);
     ceph_assert(inserted);
@@ -198,7 +247,7 @@ public:
   }
 
   void mark_delayed_extent_ool(CachedExtentRef& ref) {
-    written_ool_block_list.push_back(ref);
+    ool_block_list.push_back(ref);
   }
 
   void update_delayed_ool_extent_addr(LogicalCachedExtentRef& ref,
@@ -214,13 +263,13 @@ public:
   void mark_allocated_extent_ool(CachedExtentRef& ref) {
     assert(ref->get_paddr().is_absolute());
     assert(!ref->is_inline());
-    written_ool_block_list.push_back(ref);
+    ool_block_list.push_back(ref);
   }
 
   void mark_inplace_rewrite_extent_ool(LogicalCachedExtentRef ref) {
     assert(ref->get_paddr().is_absolute());
     assert(!ref->is_inline());
-    written_inplace_ool_block_list.push_back(ref);
+    inplace_ool_block_list.push_back(ref);
   }
 
   void add_inplace_rewrite_extent(CachedExtentRef ref) {
@@ -247,9 +296,9 @@ public:
   void replace_placeholder(CachedExtent& placeholder, CachedExtent& extent) {
     ceph_assert(!is_weak());
 
-    assert(placeholder.get_type() == extent_types_t::RETIRED_PLACEHOLDER);
-    assert(extent.get_type() != extent_types_t::RETIRED_PLACEHOLDER);
-    assert(extent.get_type() != extent_types_t::ROOT);
+    assert(is_retired_placeholder_type(placeholder.get_type()));
+    assert(!is_retired_placeholder_type(extent.get_type()));
+    assert(!is_root_type(extent.get_type()));
     assert(extent.get_paddr() == placeholder.get_paddr());
     {
       auto where = read_set.find(placeholder.get_paddr());
@@ -262,9 +311,9 @@ public:
     {
       auto where = retired_set.find(&placeholder);
       assert(where != retired_set.end());
-      assert(where->get() == &placeholder);
+      assert(where->extent.get() == &placeholder);
       where = retired_set.erase(where);
-      retired_set.emplace_hint(where, &extent);
+      retired_set.emplace_hint(where, &extent, trans_id);
     }
   }
 
@@ -304,37 +353,23 @@ public:
     return inline_block_list;
   }
 
-  const auto &get_mutated_block_list() {
-    return mutated_block_list;
-  }
-
-  const auto &get_existing_block_list() {
-    return existing_block_list;
-  }
-
-  const auto &get_retired_set() {
-    return retired_set;
-  }
-
   bool is_retired(paddr_t paddr, extent_len_t len) {
-    if (retired_set.empty()) {
+    auto iter = retired_set.lower_bound(paddr);
+    if (iter == retired_set.end()) {
       return false;
     }
-    auto iter = retired_set.lower_bound(paddr);
-    if (iter == retired_set.end() ||
-	(*iter)->get_paddr() > paddr) {
-      assert(iter != retired_set.begin());
-      --iter;
+    auto &extent = iter->extent;
+    if (extent->get_paddr() != paddr) {
+      return false;
+    } else {
+      assert(len == extent->get_length());
+      return true;
     }
-    auto retired_paddr = (*iter)->get_paddr();
-    auto retired_length = (*iter)->get_length();
-    return retired_paddr <= paddr &&
-      retired_paddr.add_offset(retired_length) >= paddr.add_offset(len);
   }
 
   template <typename F>
   auto for_each_finalized_fresh_block(F &&f) const {
-    std::for_each(written_ool_block_list.begin(), written_ool_block_list.end(), f);
+    std::for_each(ool_block_list.begin(), ool_block_list.end(), f);
     std::for_each(inline_block_list.begin(), inline_block_list.end(), f);
   }
 
@@ -374,12 +409,14 @@ public:
     src_t src,
     journal_seq_t initiated_after,
     on_destruct_func_t&& f,
-    transaction_id_t trans_id
+    transaction_id_t trans_id,
+    cache_hint_t cache_hint
   ) : weak(weak),
       handle(std::move(handle)),
       on_destruct(std::move(f)),
       src(src),
-      trans_id(trans_id)
+      trans_id(trans_id),
+      cache_hint(cache_hint)
   {}
 
   void invalidate_clear_write_set() {
@@ -393,6 +430,7 @@ public:
     get_handle().exit();
     on_destruct(*this);
     invalidate_clear_write_set();
+    views.clear();
   }
 
   friend class crimson::os::seastore::SeaStore;
@@ -411,8 +449,8 @@ public:
     num_allocated_invalid_extents = 0;
     delayed_alloc_list.clear();
     inline_block_list.clear();
-    written_ool_block_list.clear();
-    written_inplace_ool_block_list.clear();
+    ool_block_list.clear();
+    inplace_ool_block_list.clear();
     pre_alloc_list.clear();
     pre_inplace_rewrite_list.clear();
     retired_set.clear();
@@ -423,12 +461,14 @@ public:
     lba_tree_stats = {};
     backref_tree_stats = {};
     ool_write_stats = {};
-    rewrite_version_stats = {};
+    rewrite_stats = {};
     conflicted = false;
+    assert(backref_entries.empty());
     if (!has_reset) {
       has_reset = true;
     }
     get_handle().exit();
+    views.clear();
   }
 
   bool did_reset() const {
@@ -481,8 +521,8 @@ public:
   ool_write_stats_t& get_ool_write_stats() {
     return ool_write_stats;
   }
-  version_stat_t& get_rewrite_version_stats() {
-    return rewrite_version_stats;
+  rewrite_stats_t& get_rewrite_stats() {
+    return rewrite_stats;
   }
 
   struct existing_block_stats_t {
@@ -514,9 +554,43 @@ public:
     return trans_id;
   }
 
+  using view_ref = std::unique_ptr<trans_spec_view_t>;
+  template <typename T, typename... Args,
+	   std::enable_if_t<std::is_base_of_v<trans_spec_view_t, T>, int> = 0>
+  T& add_transactional_view(Args&&... args) {
+    auto &view = views.emplace_back(
+      std::make_unique<T>(std::forward<Args>(args)...));
+    return static_cast<T&>(*view);
+  }
+
+  void set_pending_ool(seastar::lw_shared_ptr<rbm_pending_ool_t> ptr) {
+    pending_ool = ptr;
+  }
+
+  seastar::lw_shared_ptr<rbm_pending_ool_t> get_pending_ool() {
+    return pending_ool;
+  }
+
+  const auto& get_pre_alloc_list() {
+    return pre_alloc_list;
+  }
+
+  cache_hint_t get_cache_hint() const {
+    return cache_hint;
+  }
+
 private:
   friend class Cache;
   friend Ref make_test_transaction();
+
+  void set_backref_entries(backref_entry_refs_t&& entries) {
+    assert(backref_entries.empty());
+    backref_entries = std::move(entries);
+  }
+
+  backref_entry_refs_t move_backref_entries() {
+    return std::move(backref_entries);
+  }
 
   /**
    * If set, *this may not be used to perform writes and will not provide
@@ -546,7 +620,7 @@ private:
    * Contains a reference (without a refcount) to every extent mutated
    * as part of *this.  No contained extent may be referenced outside
    * of *this.  Every contained extent will be in one of inline_block_list,
-   * written_ool_block_list or/and pre_alloc_list, mutated_block_list,
+   * ool_block_list or/and pre_alloc_list, mutated_block_list,
    * or delayed_alloc_list.
    */
   ExtentIndex write_set;
@@ -557,20 +631,23 @@ private:
   io_stat_t fresh_block_stats;
   uint64_t num_delayed_invalid_extents = 0;
   uint64_t num_allocated_invalid_extents = 0;
-  /// fresh blocks with delayed allocation, may become inline or ool below
+  /// fresh blocks with delayed allocation,
+  /// may become inline_block_list or ool_block_list below
   std::list<CachedExtentRef> delayed_alloc_list;
   /// fresh blocks with pre-allocated addresses with RBM,
-  /// should be released upon conflicts, will be added to ool below
+  /// should be released upon conflicts,
+  /// will be added to ool_block_list below
   std::list<CachedExtentRef> pre_alloc_list;
-  /// dirty blocks for inplace rewrite with RBM, will be added to inplace ool below
+  /// dirty blocks for inplace rewrite with RBM,
+  /// will be added to inplace inplace_ool_block_list below
   std::list<LogicalCachedExtentRef> pre_inplace_rewrite_list;
 
   /// fresh blocks that will be committed with inline journal record
   std::list<CachedExtentRef> inline_block_list;
   /// fresh blocks that will be committed with out-of-line record
-  std::list<CachedExtentRef> written_ool_block_list;
+  std::list<CachedExtentRef> ool_block_list;
   /// dirty blocks that will be committed out-of-line with inplace rewrite
-  std::list<LogicalCachedExtentRef> written_inplace_ool_block_list;
+  std::list<LogicalCachedExtentRef> inplace_ool_block_list;
 
   /// list of mutated blocks, holds refcounts, subset of write_set
   std::list<CachedExtentRef> mutated_block_list;
@@ -578,6 +655,8 @@ private:
   /// partial blocks of extents on disk, with data and refcounts
   std::list<CachedExtentRef> existing_block_list;
   existing_block_stats_t existing_block_stats;
+
+  std::list<view_ref> views;
 
   /**
    * retire_set
@@ -592,7 +671,7 @@ private:
   tree_stats_t lba_tree_stats;
   tree_stats_t backref_tree_stats;
   ool_write_stats_t ool_write_stats;
-  version_stat_t rewrite_version_stats;
+  rewrite_stats_t rewrite_stats;
 
   bool conflicted = false;
 
@@ -605,6 +684,12 @@ private:
   const src_t src;
 
   transaction_id_t trans_id = TRANS_ID_NULL;
+
+  seastar::lw_shared_ptr<rbm_pending_ool_t> pending_ool;
+
+  backref_entry_refs_t backref_entries;
+
+  cache_hint_t cache_hint = CACHE_HINT_TOUCH;
 };
 using TransactionRef = Transaction::Ref;
 
@@ -617,66 +702,10 @@ inline TransactionRef make_test_transaction() {
     Transaction::src_t::MUTATE,
     JOURNAL_SEQ_NULL,
     [](Transaction&) {},
-    ++next_id
+    ++next_id,
+    CACHE_HINT_TOUCH
   );
 }
-
-struct TransactionConflictCondition {
-  class transaction_conflict final : public std::exception {
-  public:
-    const char* what() const noexcept final {
-      return "transaction conflict detected";
-    }
-  };
-
-public:
-  TransactionConflictCondition(Transaction &t) : t(t) {}
-
-  template <typename Fut>
-  std::optional<Fut> may_interrupt() {
-    if (t.conflicted) {
-      return seastar::futurize<Fut>::make_exception_future(
-	transaction_conflict());
-    } else {
-      return std::optional<Fut>();
-    }
-  }
-
-  template <typename T>
-  static constexpr bool is_interruption_v =
-    std::is_same_v<T, transaction_conflict>;
-
-
-  static bool is_interruption(std::exception_ptr& eptr) {
-    return *eptr.__cxa_exception_type() == typeid(transaction_conflict);
-  }
-
-private:
-  Transaction &t;
-};
-
-using trans_intr = crimson::interruptible::interruptor<
-  TransactionConflictCondition
-  >;
-
-template <typename E>
-using trans_iertr =
-  crimson::interruptible::interruptible_errorator<
-    TransactionConflictCondition,
-    E
-  >;
-
-template <typename F, typename... Args>
-auto with_trans_intr(Transaction &t, F &&f, Args&&... args) {
-  return trans_intr::with_interruption_to_error<crimson::ct_error::eagain>(
-    std::move(f),
-    TransactionConflictCondition(t),
-    t,
-    std::forward<Args>(args)...);
-}
-
-template <typename T>
-using with_trans_ertr = typename T::base_ertr::template extend<crimson::ct_error::eagain>;
 
 }
 

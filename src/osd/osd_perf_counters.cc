@@ -133,6 +133,22 @@ PerfCounters *build_osd_logger(CephContext *cct) {
   osd_plb.add_time_avg(l_osd_op_before_dequeue_op_lat, "op_before_dequeue_op_lat",
     "Latency of IO before calling dequeue_op(already dequeued and get PG lock)"); // client io before dequeue_op latency
 
+
+  osd_plb.add_u64_counter(
+    l_osd_replica_read, "replica_read", "Count of replica reads received");
+  osd_plb.add_u64_counter(
+    l_osd_replica_read_redirect_missing,
+    "replica_read_redirect_missing",
+    "Count of replica reads redirected to primary due to missing object");
+  osd_plb.add_u64_counter(
+    l_osd_replica_read_redirect_conflict,
+    "replica_read_redirect_conflict",
+    "Count of replica reads redirected to primary due to unstable write");
+  osd_plb.add_u64_counter(
+    l_osd_replica_read_served,
+    "replica_read_served",
+    "Count of replica reads served");
+
   osd_plb.add_u64_counter(
     l_osd_sop, "subop", "Suboperations");
   osd_plb.add_u64_counter(
@@ -337,6 +353,10 @@ PerfCounters *build_osd_logger(CephContext *cct) {
   osd_plb.add_u64_counter_histogram(
       l_osd_scrub_reservation_dur_hist, "scrub_resrv_repnum_vs_duration",
       rsrv_hist_x_axis_config, rsrv_hist_y_axis_config, "Histogram of scrub replicas reservation duration");
+  osd_plb.add_u64_counter(
+  l_osd_watch_timeouts, "watch_timeouts",
+  "Number of watches that timed out or were blocklisted",
+  NULL, PerfCountersBuilder::PRIO_USEFUL);
 
   return osd_plb.create_perf_counters();
 }
@@ -406,7 +426,6 @@ PerfCounters *build_scrub_labeled_perf(CephContext *cct, std::string label)
   scrub_perf.add_u64_counter(scrbcnt_resrv_success, "scrub_reservations_completed", "successfully completed reservation processes");
   scrub_perf.add_time_avg(scrbcnt_resrv_successful_elapsed, "successful_reservations_elapsed", "time to scrub reservation completion");
   scrub_perf.add_u64_counter(scrbcnt_resrv_aborted, "reservation_process_aborted", "scrub reservation was aborted");
-  scrub_perf.add_u64_counter(scrbcnt_resrv_timed_out, "reservation_process_timed_out", "scrub reservation timed out");
   scrub_perf.add_u64_counter(scrbcnt_resrv_rejected, "reservation_process_failure", "scrub reservation failed due to replica denial");
   scrub_perf.add_u64_counter(scrbcnt_resrv_skipped, "reservation_process_skipped", "scrub reservation skipped for high priority scrub");
   scrub_perf.add_time_avg(scrbcnt_resrv_failed_elapsed, "failed_reservations_elapsed", "time for scrub reservation to fail");

@@ -585,7 +585,7 @@ int MotrBucket::remove(const DoutPrefixProvider *dpp, bool delete_children, opti
 
       std::unique_ptr<rgw::sal::Object> object = get_object(key);
 
-      ret = object->delete_object(dpp, null_yield, rgw::sal::FLAG_LOG_OP);
+      ret = object->delete_object(dpp, null_yield, rgw::sal::FLAG_LOG_OP, nullptr, nullptr);
       if (ret < 0 && ret != -ENOENT) {
         ldpp_dout(dpp, 0) << "ERROR: remove_bucket rgw_remove_object failed rc=" << ret << dendl;
 	      return ret;
@@ -1111,11 +1111,6 @@ bool MotrZone::get_redirect_endpoint(std::string* endpoint)
   return false;
 }
 
-bool MotrZone::has_zonegroup_api(const std::string& api) const
-{
-  return (zonegroup.group.api_name == api);
-}
-
 const std::string& MotrZone::get_current_period_id()
 {
   return current_period->get_id();
@@ -1126,7 +1121,7 @@ std::unique_ptr<LuaManager> MotrStore::get_lua_manager(const DoutPrefixProvider 
   return std::make_unique<MotrLuaManager>(this, dpp, luarocks_path);
 }
 
-int MotrObject::get_obj_state(const DoutPrefixProvider* dpp, RGWObjState **_state, optional_yield y, bool follow_olh)
+int MotrObject::load_obj_state(const DoutPrefixProvider* dpp, optional_yield y, bool follow_olh)
 {
   // Get object's metadata (those stored in rgw_bucket_dir_entry).
   bufferlist bl;
@@ -1182,7 +1177,7 @@ MotrObject::~MotrObject() {
 //    return read_op.prepare(dpp);
 //  }
 
-int MotrObject::set_obj_attrs(const DoutPrefixProvider* dpp, Attrs* setattrs, Attrs* delattrs, optional_yield y)
+int MotrObject::set_obj_attrs(const DoutPrefixProvider* dpp, Attrs* setattrs, Attrs* delattrs, optional_yield y, uint32_t flags)
 {
   // TODO: implement
   ldpp_dout(dpp, 20) <<__func__<< ": MotrObject::set_obj_attrs()" << dendl;
@@ -1238,7 +1233,7 @@ int MotrObject::modify_obj_attrs(const char* attr_name, bufferlist& attr_val, op
   }
   set_atomic();
   state.attrset[attr_name] = attr_val;
-  return set_obj_attrs(dpp, &state.attrset, nullptr, y);
+  return set_obj_attrs(dpp, &state.attrset, nullptr, y, rgw::sal::FLAG_LOG_OP);
 }
 
 int MotrObject::delete_obj_attrs(const DoutPrefixProvider* dpp, const char* attr_name, optional_yield y)
@@ -1249,7 +1244,7 @@ int MotrObject::delete_obj_attrs(const DoutPrefixProvider* dpp, const char* attr
 
   set_atomic();
   rmattr[attr_name] = bl;
-  return set_obj_attrs(dpp, nullptr, &rmattr, y);
+  return set_obj_attrs(dpp, nullptr, &rmattr, y, rgw::sal::FLAG_LOG_OP);
 }
 
 bool MotrObject::is_expired() {
@@ -1393,7 +1388,7 @@ int MotrObject::MotrReadOp::prepare(optional_yield y, const DoutPrefixProvider* 
   }
 
   // Skip opening an empty object.
-  if(source->get_obj_size() == 0)
+  if(source->get_size() == 0)
     return 0;
 
   // Open the object here.
@@ -1449,7 +1444,7 @@ MotrObject::MotrDeleteOp::MotrDeleteOp(MotrObject *_source) :
   source(_source)
 { }
 
-// Implementation of DELETE OBJ also requires MotrObject::get_obj_state()
+// Implementation of DELETE OBJ also requires MotrObject::load_obj_state()
 // to retrieve and set object's state from object's metadata.
 //
 // TODO:
@@ -1502,7 +1497,11 @@ int MotrObject::MotrDeleteOp::delete_obj(const DoutPrefixProvider* dpp, optional
   return 0;
 }
 
-int MotrObject::delete_object(const DoutPrefixProvider* dpp, optional_yield y, uint32_t flags)
+int MotrObject::delete_object(const DoutPrefixProvider* dpp,
+    optional_yield y,
+    uint32_t flags,
+    std::list<rgw_obj_index_key>* remove_objs,
+    RGWObjVersionTracker* objv)
 {
   MotrObject::MotrDeleteOp del_op(this);
   del_op.params.bucket_owner = bucket->get_info().owner;
@@ -2668,7 +2667,8 @@ int MotrMultipartUpload::complete(const DoutPrefixProvider *dpp,
 				   RGWCompressionInfo& cs_info, off_t& off,
 				   std::string& tag, ACLOwner& owner,
 				   uint64_t olh_epoch,
-				   rgw::sal::Object* target_obj)
+				   rgw::sal::Object* target_obj,
+				   prefix_map_t& processed_prefixes)
 {
   char final_etag[CEPH_CRYPTO_MD5_DIGESTSIZE];
   char final_etag_str[CEPH_CRYPTO_MD5_DIGESTSIZE * 2 + 16];
@@ -2762,9 +2762,13 @@ int MotrMultipartUpload::complete(const DoutPrefixProvider *dpp,
       bool part_compressed = (part->cs_info.compression_type != "none");
       if ((handled_parts > 0) &&
           ((part_compressed != compressed) ||
-            (cs_info.compression_type != part->cs_info.compression_type))) {
-          ldpp_dout(dpp, 0) << "ERROR: compression type was changed during multipart upload ("
-                           << cs_info.compression_type << ">>" << part->cs_info.compression_type << ")" << dendl;
+           (cs_info.compression_type != obj_part.cs_info.compression_type) ||
+           (cs_info.compressor_message.has_value() &&
+           (cs_info.compressor_message != obj_part.cs_info.compressor_message)))) {
+          ldpp_dout(dpp, 0) << "ERROR: compression type or compressor message was changed during multipart upload ("
+                           << cs_info.compression_type << ">>" << part->cs_info.compression_type << "),"
+                           << cs_info.compressor_message << ">>" << obj_part.cs_info.compressor_message << ")"
+                           << dendl;
           rc = -ERR_INVALID_PART;
           return rc;
       }
@@ -2784,8 +2788,11 @@ int MotrMultipartUpload::complete(const DoutPrefixProvider *dpp,
           cs_info.blocks.push_back(cb);
           new_ofs = cb.new_ofs + cb.len;
         }
-        if (!compressed)
+        if (!compressed) {
           cs_info.compression_type = part->cs_info.compression_type;
+          if (obj_part.cs_info.compressor_message.has_value())
+            cs_info.compressor_message = obj_part.cs_info.compressor_message;
+        }
         cs_info.orig_size += part->cs_info.orig_size;
         compressed = true;
       }
@@ -2869,6 +2876,15 @@ int MotrMultipartUpload::complete(const DoutPrefixProvider *dpp,
   ldpp_dout(dpp, 20) << "MotrMultipartUpload::complete(): remove from bucket multipartindex " << dendl;
   return store->do_idx_op_by_name(bucket_multipart_iname,
                                   M0_IC_DEL, meta_obj->get_key().get_oid(), bl);
+}
+
+int MotrMultipartUpload::cleanup_orphaned_parts(const DoutPrefixProvider *dpp,
+    CephContext *cct, optional_yield y,
+    const rgw_obj& obj,
+    std::list<rgw_obj_index_key>& remove_objs,
+    prefix_map_t& processed_prefixes)
+{
+  return -ENOTSUP;
 }
 
 int MotrMultipartUpload::get_info(const DoutPrefixProvider *dpp, optional_yield y, rgw_placement_rule** rule, rgw::sal::Attrs* attrs)
@@ -3308,6 +3324,12 @@ int MotrStore::cluster_stat(RGWClusterStat& stats)
 }
 
 std::unique_ptr<Lifecycle> MotrStore::get_lifecycle(void)
+{
+  return 0;
+}
+
+bool MotrStore::process_expired_objects(const DoutPrefixProvider *dpp,
+	       				optional_yield y)
 {
   return 0;
 }

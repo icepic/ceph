@@ -63,6 +63,7 @@ static ostream& _prefix(std::ostream *_dout,
   // TODO: backref to ECListener?
   return *_dout;
 }
+static ostream& _prefix(std::ostream *_dout, struct ClientReadCompleter *read_completer);
 
 ostream &operator<<(ostream &lhs, const ECCommon::RMWPipeline::pipeline_state_t &rhs) {
   switch (rhs.pipeline_state) {
@@ -74,6 +75,19 @@ ostream &operator<<(ostream &lhs, const ECCommon::RMWPipeline::pipeline_state_t 
     ceph_abort_msg("invalid pipeline state");
   }
   return lhs; // unreachable
+}
+
+ostream &operator<<(ostream &lhs, const ECCommon::ec_align_t &rhs)
+{
+  return lhs << rhs.offset << ","
+	     << rhs.size << ","
+	     << rhs.flags;
+}
+
+ostream &operator<<(ostream &lhs, const ECCommon::ec_extent_t &rhs)
+{
+  return lhs << rhs.err << ","
+	     << rhs.emap;
 }
 
 ostream &operator<<(ostream &lhs, const ECCommon::read_request_t &rhs)
@@ -110,6 +124,7 @@ ostream &operator<<(ostream &lhs, const ECCommon::ReadOp &rhs)
 	     << ", priority=" << rhs.priority
 	     << ", obj_to_source=" << rhs.obj_to_source
 	     << ", source_to_obj=" << rhs.source_to_obj
+	     << ", want_to_read" << rhs.want_to_read
 	     << ", in_progress=" << rhs.in_progress << ")";
 }
 
@@ -126,6 +141,7 @@ void ECCommon::ReadOp::dump(Formatter *f) const
   f->dump_int("priority", priority);
   f->dump_stream("obj_to_source") << obj_to_source;
   f->dump_stream("source_to_obj") << source_to_obj;
+  f->dump_stream("want_to_read") << want_to_read;
   f->dump_stream("in_progress") << in_progress;
 }
 
@@ -142,7 +158,7 @@ ostream &operator<<(ostream &lhs, const ECCommon::RMWPipeline::Op &rhs)
     rhs.client_op->get_req()->print(lhs);
   }
 #endif
-  lhs << " roll_forward_to=" << rhs.roll_forward_to
+  lhs << " pg_committed_to=" << rhs.pg_committed_to
       << " temp_added=" << rhs.temp_added
       << " temp_cleared=" << rhs.temp_cleared
       << " pending_read=" << rhs.pending_read
@@ -158,16 +174,19 @@ ostream &operator<<(ostream &lhs, const ECCommon::RMWPipeline::Op &rhs)
 
 void ECCommon::ReadPipeline::complete_read_op(ReadOp &rop)
 {
-  map<hobject_t, read_request_t>::iterator reqiter =
+  dout(20) << __func__ << " completing " << rop << dendl;
+  map<hobject_t, read_request_t>::iterator req_iter =
     rop.to_read.begin();
   map<hobject_t, read_result_t>::iterator resiter =
     rop.complete.begin();
   ceph_assert(rop.to_read.size() == rop.complete.size());
-  for (; reqiter != rop.to_read.end(); ++reqiter, ++resiter) {
+  for (; req_iter != rop.to_read.end(); ++req_iter, ++resiter) {
+    ceph_assert(rop.want_to_read.contains(req_iter->first));
     rop.on_complete->finish_single_request(
-      reqiter->first,
+      req_iter->first,
       resiter->second,
-      reqiter->second.to_read);
+      req_iter->second.to_read,
+      rop.want_to_read[req_iter->first]);
   }
   ceph_assert(rop.on_complete);
   std::move(*rop.on_complete).finish(rop.priority);
@@ -207,8 +226,14 @@ void ECCommon::ReadPipeline::get_all_avail_shards(
        ++i) {
     dout(10) << __func__ << ": checking acting " << *i << dendl;
     const pg_missing_t &missing = get_parent()->get_shard_missing(*i);
-    if (error_shards.find(*i) != error_shards.end())
+    if (error_shards.contains(*i)) {
       continue;
+    }
+    if (cct->_conf->bluestore_debug_inject_read_err &&
+        ec_inject_test_read_error1(ghobject_t(hoid, ghobject_t::NO_GEN, i->shard))) {
+      dout(0) << __func__ << " Error inject - Missing shard " << i->shard << dendl;
+      continue;
+    }
     if (!missing.is_missing(hoid)) {
       ceph_assert(!have.count(i->shard));
       have.insert(i->shard);
@@ -296,6 +321,33 @@ int ECCommon::ReadPipeline::get_min_avail_to_read_shards(
     to_read->insert(make_pair(shards[shard_id_t(i.first)], i.second));
   }
   return 0;
+}
+
+// a static for the sake of unittesting
+void ECCommon::ReadPipeline::get_min_want_to_read_shards(
+  const uint64_t offset,
+  const uint64_t length,
+  const ECUtil::stripe_info_t& sinfo,
+  set<int> *want_to_read)
+{
+  const auto [left_chunk_index, right_chunk_index] =
+    sinfo.offset_length_to_data_chunk_indices(offset, length);
+  const auto distance =
+    std::min(right_chunk_index - left_chunk_index, (uint64_t)sinfo.get_k());
+  for(uint64_t i = 0; i < distance; i++) {
+    auto raw_shard = (left_chunk_index + i) % sinfo.get_k();
+    want_to_read->insert(sinfo.get_shard(raw_shard));
+  }
+}
+
+void ECCommon::ReadPipeline::get_min_want_to_read_shards(
+  const uint64_t offset,
+  const uint64_t length,
+  set<int> *want_to_read)
+{
+  get_min_want_to_read_shards(offset, length, sinfo, want_to_read);
+  dout(20) << __func__ << ": offset " << offset << " length " << length
+	   << " want_to_read " << *want_to_read << dendl;
 }
 
 int ECCommon::ReadPipeline::get_remaining_shards(
@@ -400,12 +452,9 @@ void ECCommon::ReadPipeline::do_read_op(ReadOp &op)
       op.obj_to_source[i->first].insert(j->first);
       op.source_to_obj[j->first].insert(i->first);
     }
-    for (list<boost::tuple<uint64_t, uint64_t, uint32_t> >::const_iterator j =
-	   i->second.to_read.begin();
-	 j != i->second.to_read.end();
-	 ++j) {
-      pair<uint64_t, uint64_t> chunk_off_len =
-	sinfo.aligned_offset_len_to_chunk(make_pair(j->get<0>(), j->get<1>()));
+    for (const auto& read : i->second.to_read) {
+      auto p = make_pair(read.offset, read.size);
+      pair<uint64_t, uint64_t> chunk_off_len = sinfo.chunk_aligned_offset_len_to_chunk(p);
       for (auto k = i->second.need.begin();
 	   k != i->second.need.end();
 	   ++k) {
@@ -413,7 +462,7 @@ void ECCommon::ReadPipeline::do_read_op(ReadOp &op)
 	  boost::make_tuple(
 	    chunk_off_len.first,
 	    chunk_off_len.second,
-	    j->get<2>()));
+	    read.flags));
       }
       ceph_assert(!need_attrs);
     }
@@ -454,10 +503,8 @@ void ECCommon::ReadPipeline::do_read_op(ReadOp &op)
 void ECCommon::ReadPipeline::get_want_to_read_shards(
   std::set<int> *want_to_read) const
 {
-  const std::vector<int> &chunk_mapping = ec_impl->get_chunk_mapping();
-  for (int i = 0; i < (int)ec_impl->get_data_chunk_count(); ++i) {
-    int chunk = (int)chunk_mapping.size() > i ? chunk_mapping[i] : i;
-    want_to_read->insert(chunk);
+  for (int i = 0; i < (int)sinfo.get_k(); ++i) {
+    want_to_read->insert(sinfo.get_shard(i));
   }
 }
 
@@ -470,19 +517,23 @@ struct ClientReadCompleter : ECCommon::ReadCompleter {
   void finish_single_request(
     const hobject_t &hoid,
     ECCommon::read_result_t &res,
-    list<boost::tuple<uint64_t, uint64_t, uint32_t> > to_read) override
+    list<ECCommon::ec_align_t> to_read,
+    set<int> wanted_to_read) override
   {
+    auto* cct = read_pipeline.cct;
+    dout(20) << __func__ << " completing hoid=" << hoid
+             << " res=" << res << " to_read="  << to_read << dendl;
     extent_map result;
     if (res.r != 0)
       goto out;
     ceph_assert(res.returned.size() == to_read.size());
     ceph_assert(res.errors.empty());
     for (auto &&read: to_read) {
-      pair<uint64_t, uint64_t> adjusted =
-	read_pipeline.sinfo.offset_len_to_stripe_bounds(
-	  make_pair(read.get<0>(), read.get<1>()));
-      ceph_assert(res.returned.front().get<0>() == adjusted.first);
-      ceph_assert(res.returned.front().get<1>() == adjusted.second);
+      const auto bounds = make_pair(read.offset, read.size);
+      const auto aligned =
+	read_pipeline.sinfo.offset_len_to_chunk_bounds(bounds);
+      ceph_assert(res.returned.front().get<0>() == aligned.first);
+      ceph_assert(res.returned.front().get<1>() == aligned.second);
       map<int, bufferlist> to_decode;
       bufferlist bl;
       for (map<pg_shard_t, bufferlist>::iterator j =
@@ -491,26 +542,53 @@ struct ClientReadCompleter : ECCommon::ReadCompleter {
 	   ++j) {
 	to_decode[j->first.shard] = std::move(j->second);
       }
+      dout(20) << __func__ << " going to decode: "
+               << " wanted_to_read=" << wanted_to_read
+               << " to_decode=" << to_decode
+               << dendl;
       int r = ECUtil::decode(
 	read_pipeline.sinfo,
 	read_pipeline.ec_impl,
+	wanted_to_read,
 	to_decode,
 	&bl);
       if (r < 0) {
+        dout(10) << __func__ << " error on ECUtil::decode r=" << r << dendl;
         res.r = r;
         goto out;
       }
       bufferlist trimmed;
-      trimmed.substr_of(
-	bl,
-	read.get<0>() - adjusted.first,
-	std::min(read.get<1>(),
-	    bl.length() - (read.get<0>() - adjusted.first)));
+      // If partial stripe reads are disabled aligned_offset_in_stripe will
+      // be 0 which will mean trim_offset is 0. When partial reads are enabled
+      // the shards read (wanted_to_read) is a union of the requirements for
+      // each stripe, each range being read may need to trim unneeded shards
+      uint64_t aligned_offset_in_stripe = aligned.first -
+	read_pipeline.sinfo.logical_to_prev_stripe_offset(aligned.first);
+      uint64_t chunk_size = read_pipeline.sinfo.get_chunk_size();
+      uint64_t trim_offset = 0;
+      for (auto shard : wanted_to_read) {
+	if (read_pipeline.sinfo.get_raw_shard(shard) * chunk_size <
+	    aligned_offset_in_stripe) {
+	  trim_offset += chunk_size;
+	} else {
+	  break;
+	}
+      }
+      auto off = read.offset + trim_offset - aligned.first;
+      dout(20) << __func__ << " bl.length()=" << bl.length()
+	       << " off=" << off
+	       << " read.offset=" << read.offset
+	       << " read.size=" << read.size
+	       << " trim_offset="<< trim_offset << dendl;
+      ceph_assert(read.size <= bl.length() - off);
+      trimmed.substr_of(bl, off, read.size);
       result.insert(
-	read.get<0>(), trimmed.length(), std::move(trimmed));
+	read.offset, trimmed.length(), std::move(trimmed));
       res.returned.pop_front();
     }
 out:
+    dout(20) << __func__ << " calling complete_object with result="
+             << result << dendl;
     status->complete_object(hoid, res.r, std::move(result));
     read_pipeline.kick_reads();
   }
@@ -523,13 +601,14 @@ out:
   ECCommon::ReadPipeline &read_pipeline;
   ECCommon::ClientAsyncReadStatus *status;
 };
+static ostream& _prefix(std::ostream *_dout, ClientReadCompleter *read_completer) {
+  return _prefix(_dout, &read_completer->read_pipeline);
+}
 
 void ECCommon::ReadPipeline::objects_read_and_reconstruct(
-  const map<hobject_t,
-    std::list<boost::tuple<uint64_t, uint64_t, uint32_t> >
-  > &reads,
+  const map<hobject_t, std::list<ECCommon::ec_align_t>> &reads,
   bool fast_read,
-  GenContextURef<map<hobject_t,pair<int, extent_map> > &&> &&func)
+  GenContextURef<ECCommon::ec_extents_t &&> &&func)
 {
   in_progress_client_reads.emplace_back(
     reads.size(), std::move(func));
@@ -539,11 +618,19 @@ void ECCommon::ReadPipeline::objects_read_and_reconstruct(
   }
 
   map<hobject_t, set<int>> obj_want_to_read;
-  set<int> want_to_read;
-  get_want_to_read_shards(&want_to_read);
     
   map<hobject_t, read_request_t> for_read_op;
   for (auto &&to_read: reads) {
+    set<int> want_to_read;
+    if (cct->_conf->osd_ec_partial_reads) {
+      for (const auto& single_region : to_read.second) {
+        get_min_want_to_read_shards(single_region.offset,
+				    single_region.size,
+				    &want_to_read);
+      }
+    } else {
+      get_want_to_read_shards(&want_to_read);
+    }
     map<pg_shard_t, vector<pair<int, int>>> shards;
     int r = get_min_avail_to_read_shards(
       to_read.first,
@@ -552,6 +639,12 @@ void ECCommon::ReadPipeline::objects_read_and_reconstruct(
       fast_read,
       &shards);
     ceph_assert(r == 0);
+
+    int subchunk_size =
+      sinfo.get_chunk_size() / ec_impl->get_sub_chunk_count();
+    dout(20) << __func__
+             << " subchunk_size=" << subchunk_size
+             << " chunk_size=" << sinfo.get_chunk_size() << dendl;
 
     for_read_op.insert(
       make_pair(
@@ -589,8 +682,7 @@ int ECCommon::ReadPipeline::send_all_remaining_reads(
   if (r)
     return r;
 
-  list<boost::tuple<uint64_t, uint64_t, uint32_t> > offsets =
-    rop.to_read.find(hoid)->second.to_read;
+  list<ec_align_t> to_read = rop.to_read.find(hoid)->second.to_read;
 
   // (Note cuixf) If we need to read attrs and we read failed, try to read again.
   bool want_attrs =
@@ -604,7 +696,7 @@ int ECCommon::ReadPipeline::send_all_remaining_reads(
   rop.to_read.insert(make_pair(
       hoid,
       read_request_t(
-	offsets,
+	to_read,
 	shards,
 	want_attrs)));
   return 0;
@@ -694,9 +786,9 @@ bool ECCommon::RMWPipeline::try_state_to_reads()
     ceph_assert(get_parent()->get_pool().allows_ecoverwrites());
     objects_read_async_no_cache(
       op->remote_read,
-      [op, this](map<hobject_t,pair<int, extent_map> > &&results) {
+      [op, this](ec_extents_t &&results) {
 	for (auto &&i: results) {
-	  op->remote_read_result.emplace(i.first, i.second.second);
+	  op->remote_read_result.emplace(make_pair(i.first, i.second.emap));
 	}
 	check_ops();
       });
@@ -815,7 +907,7 @@ bool ECCommon::RMWPipeline::try_reads_to_commit()
       should_send ? iter->second : empty,
       op->version,
       op->trim_to,
-      op->roll_forward_to,
+      op->pg_committed_to,
       op->log_entries,
       op->updated_hit_set_history,
       op->temp_added,
@@ -832,6 +924,11 @@ bool ECCommon::RMWPipeline::try_reads_to_commit()
     if (*i == get_parent()->whoami_shard()) {
       should_write_local = true;
       local_write_op.claim(sop);
+    } else if (cct->_conf->bluestore_debug_inject_read_err &&
+	       ec_inject_test_write_error1(ghobject_t(op->hoid,
+		 ghobject_t::NO_GEN, i->shard))) {
+      dout(0) << " Error inject - Dropping write message to shard " <<
+	i->shard << dendl;
     } else {
       MOSDECSubOpWrite *r = new MOSDECSubOpWrite(sop);
       r->pgid = spg_t(get_parent()->primary_spg_t().pgid, i->shard);
@@ -890,8 +987,8 @@ bool ECCommon::RMWPipeline::try_finish_rmw()
   dout(10) << __func__ << ": " << *op << dendl;
   dout(20) << __func__ << ": " << cache << dendl;
 
-  if (op->roll_forward_to > completed_to)
-    completed_to = op->roll_forward_to;
+  if (op->pg_committed_to > completed_to)
+    completed_to = op->pg_committed_to;
   if (op->version > committed_to)
     committed_to = op->version;
 
@@ -904,7 +1001,7 @@ bool ECCommon::RMWPipeline::try_finish_rmw()
       auto nop = std::make_unique<ECDummyOp>();
       nop->hoid = op->hoid;
       nop->trim_to = op->trim_to;
-      nop->roll_forward_to = op->version;
+      nop->pg_committed_to = op->version;
       nop->tid = tid;
       nop->reqid = op->reqid;
       waiting_reads.push_back(*nop);
@@ -1009,4 +1106,306 @@ ECUtil::HashInfoRef ECCommon::UnstableHashInfoRegistry::get_hash_info(
     }
   }
   return ref;
+}
+
+// Error inject interfaces
+static ceph::recursive_mutex ec_inject_lock =
+  ceph::make_recursive_mutex("ECCommon::ec_inject_lock");
+static std::map<ghobject_t,std::pair<int64_t,int64_t>> ec_inject_read_failures0;
+static std::map<ghobject_t,std::pair<int64_t,int64_t>> ec_inject_read_failures1;
+static std::map<ghobject_t,std::pair<int64_t,int64_t>> ec_inject_write_failures0;
+static std::map<ghobject_t,std::pair<int64_t,int64_t>> ec_inject_write_failures1;
+static std::map<ghobject_t,std::pair<int64_t,int64_t>> ec_inject_write_failures2;
+static std::map<ghobject_t,std::pair<int64_t,int64_t>> ec_inject_write_failures3;
+static std::map<ghobject_t,shard_id_t> ec_inject_write_failures0_shard;
+static std::set<osd_reqid_t> ec_inject_write_failures0_reqid;
+
+/**
+ * Configure a read error inject that typically forces additional reads of
+ * shards in an EC pool to recover data using the redundancy. With multiple
+ * errors it is possible to force client reads to fail.
+ *
+ * Type 0 - Simulate a medium error. Fail a read with -EIO to force
+ * additional reads and a decode
+ *
+ * Type 1 - Simulate a missing OSD. Dont even try to read a shard
+ *
+ * @brief Set up a read error inject for an object in an EC pool.
+ * @param o Target object for the error inject.
+ * @param when Error inject starts after this many object store reads.
+ * @param duration Error inject affects this many object store reads.
+ * @param type Type of error inject 0 = EIO, 1 = missing shard.
+ * @return string Result of configuring the error inject.
+ */
+std::string ec_inject_read_error(const ghobject_t& o,
+				 const int64_t type,
+				 const int64_t when,
+				 const int64_t duration) {
+  std::lock_guard<ceph::recursive_mutex> l(ec_inject_lock);
+  ghobject_t os = o;
+  if (os.hobj.oid.name == "*") {
+    os.hobj.set_hash(0);
+  }
+  switch (type) {
+  case 0:
+    ec_inject_read_failures0[os] = std::pair(when, duration);
+    return "ok - read returns EIO";
+  case 1:
+    ec_inject_read_failures1[os] = std::pair(when, duration);
+    return "ok - read pretends shard is missing";
+  default:
+    break;
+  }
+  return "unrecognized error inject type";
+}
+
+/**
+ * Configure a write error inject that either fails an OSD or causes a
+ * client write operation to be rolled back.
+ *
+ * Type 0 - Tests rollback. Drop a write I/O to a shard, then simulate an OSD
+ * down to force rollback to occur, lastly fail the retried write from the
+ * client so the results of the rollback can be inspected.
+ *
+ * Type 1 - Drop a write I/O to a shard. Used on its own this will hang a
+ * write I/O.
+ *
+ * Type 2 - Simulate an OSD down (ceph osd down) to force a new epoch. Usually
+ * used together with type 1 to force a rollback
+ *
+ * Type 3 - Abort when an OSD processes a write I/O to a shard. Typically the
+ * client write will be commited while the OSD is absent which will result in
+ * recovery or backfill later when the OSD returns.
+ *
+ * @brief Set up a write error inject for an object in an EC pool.
+ * @param o Target object for the error inject.
+ * @param when Error inject starts after this many object store reads.
+ * @param duration Error inject affects this many object store reads.
+ * @param type Type of error inject 0 = EIO, 1 = missing shard.
+ * @return string Result of configuring the error inect.
+ */
+std::string ec_inject_write_error(const ghobject_t& o,
+				  const int64_t type,
+				  const int64_t when,
+				  const int64_t duration) {
+  std::lock_guard<ceph::recursive_mutex> l(ec_inject_lock);
+  std::map<ghobject_t,std::pair<int64_t,int64_t>> *failures;
+  ghobject_t os = o;
+  bool no_shard = true;
+  std::string result;
+  switch (type) {
+  case 0:
+    failures = &ec_inject_write_failures0;
+    result = "ok - drop write, sim OSD down and fail client retry with EINVAL";
+    break;
+  case 1:
+    failures = &ec_inject_write_failures1;
+    no_shard = false;
+    result = "ok - drop write to shard";
+    break;
+  case 2:
+    failures = &ec_inject_write_failures2;
+    result = "ok - inject OSD down";
+    break;
+  case 3:
+    if (duration != 1) {
+      return "duration must be 1";
+    }
+    failures = &ec_inject_write_failures3;
+    result = "ok - write abort OSDs";
+    break;
+  default:
+    return "unrecognized error inject type";
+  }
+  if (no_shard) {
+    os.set_shard(shard_id_t::NO_SHARD);
+  }
+  if (os.hobj.oid.name == "*") {
+    os.hobj.set_hash(0);
+  }
+  (*failures)[os] = std::pair(when, duration);
+  if (type == 0) {
+    ec_inject_write_failures0_shard[os] = o.shard_id;
+  }
+  return result;
+}
+
+/**
+ * @brief Clear a previously configured read error inject.
+ * @param o Target object for the error inject.
+ * @param type Type of error inject 0 = EIO, 1 = missing shard.
+ * @return string Indication of how many errors were cleared.
+ */
+std::string ec_inject_clear_read_error(const ghobject_t& o,
+				       const int64_t type) {
+  std::lock_guard<ceph::recursive_mutex> l(ec_inject_lock);
+  std::map<ghobject_t,std::pair<int64_t,int64_t>> *failures;
+  ghobject_t os = o;
+  int64_t remaining = 0;
+  switch (type) {
+  case 0:
+    failures = &ec_inject_read_failures0;
+    break;
+  case 1:
+    failures = &ec_inject_read_failures1;
+    break;
+  default:
+    return "unrecognized error inject type";
+  }
+  if (os.hobj.oid.name == "*") {
+    os.hobj.set_hash(0);
+  }
+  auto it = failures->find(os);
+  if (it != failures->end()) {
+    remaining = it->second.second;
+    failures->erase(it);
+  }
+  if (remaining == 0) {
+    return "no outstanding error injects";
+  } else if (remaining == 1) {
+    return "ok - 1 inject cleared";
+  }
+  return "ok - " + std::to_string(remaining) + " injects cleared";
+}
+
+/**
+ * @brief Clear a previously configured write error inject.
+ * @param o Target object for the error inject.
+ * @param type Type of error inject 0 = EIO, 1 = missing shard.
+ * @return string Indication of how many errors were cleared.
+ */
+std::string ec_inject_clear_write_error(const ghobject_t& o,
+					const int64_t type) {
+  std::lock_guard<ceph::recursive_mutex> l(ec_inject_lock);
+  std::map<ghobject_t,std::pair<int64_t,int64_t>> *failures;
+  ghobject_t os = o;
+  bool no_shard = true;
+  int64_t remaining = 0;
+  switch (type) {
+  case 0:
+    failures = &ec_inject_write_failures0;
+    break;
+  case 1:
+    failures = &ec_inject_write_failures1;
+    no_shard = false;
+    break;
+  case 2:
+    failures = &ec_inject_write_failures2;
+    break;
+  case 3:
+    failures = &ec_inject_write_failures3;
+    break;
+  default:
+    return "unrecognized error inject type";
+  }
+  if (no_shard) {
+    os.set_shard(shard_id_t::NO_SHARD);
+  }
+  if (os.hobj.oid.name == "*") {
+    os.hobj.set_hash(0);
+  }
+  auto it = failures->find(os);
+  if (it != failures->end()) {
+    remaining = it->second.second;
+    failures->erase(it);
+    if (type == 0) {
+      ec_inject_write_failures0_shard.erase(os);
+    }
+  }
+  if (remaining == 0) {
+    return "no outstanding error injects";
+  } else if (remaining == 1) {
+    return "ok - 1 inject cleared";
+  }
+  return "ok - " + std::to_string(remaining) + " injects cleared";
+}
+
+static bool ec_inject_test_error(const ghobject_t& o,
+  std::map<ghobject_t,std::pair<int64_t,int64_t>> *failures)
+{
+  std::lock_guard<ceph::recursive_mutex> l(ec_inject_lock);
+  auto it = failures->find(o);
+  if (it == failures->end()) {
+    ghobject_t os = o;
+    os.hobj.oid.name = "*";
+    os.hobj.set_hash(0);
+    it = failures->find(os);
+  }
+  if (it != failures->end()) {
+    auto && [when,duration] = it->second;
+    if (when > 0) {
+      when--;
+      return false;
+    }
+    if (--duration <= 0) {
+      failures->erase(it);
+    }
+    return true;
+  }
+  return false;
+}
+
+bool ec_inject_test_read_error0(const ghobject_t& o)
+{
+  return ec_inject_test_error(o, &ec_inject_read_failures0);
+}
+
+bool ec_inject_test_read_error1(const ghobject_t& o)
+{
+  return ec_inject_test_error(o, &ec_inject_read_failures1);
+}
+
+bool ec_inject_test_write_error0(const hobject_t& o,
+				 const osd_reqid_t& reqid) {
+  std::lock_guard<ceph::recursive_mutex> l(ec_inject_lock);
+  ghobject_t os = ghobject_t(o, ghobject_t::NO_GEN, shard_id_t::NO_SHARD);
+  if (ec_inject_write_failures0_reqid.count(reqid)) {
+    // Matched reqid of retried write - flag for failure
+    ec_inject_write_failures0_reqid.erase(reqid);
+    return true;
+  }
+  auto it = ec_inject_write_failures0.find(os);
+  if (it == ec_inject_write_failures0.end()) {
+    os.hobj.oid.name = "*";
+    os.hobj.set_hash(0);
+    it = ec_inject_write_failures0.find(os);
+  }
+  if (it != ec_inject_write_failures0.end()) {
+    auto && [when, duration] = it->second;
+    auto shard = ec_inject_write_failures0_shard.find(os)->second;
+    if (when > 0) {
+      when--;
+    } else {
+      if (--duration <= 0) {
+	ec_inject_write_failures0.erase(it);
+	ec_inject_write_failures0_shard.erase(os);
+      }
+      // Error inject triggered - save reqid
+      ec_inject_write_failures0_reqid.insert(reqid);
+      // Set up error inject to drop message to primary
+      ec_inject_write_error(ghobject_t(o, ghobject_t::NO_GEN, shard), 1, 0, 1);
+    }
+  }
+  return false;
+}
+
+bool ec_inject_test_write_error1(const ghobject_t& o) {
+  bool rc = ec_inject_test_error(o, &ec_inject_write_failures1);
+  if (rc) {
+    // Set up error inject to generate OSD down
+    ec_inject_write_error(o, 2, 0, 1);
+  }
+  return rc;
+}
+
+bool ec_inject_test_write_error2(const hobject_t& o) {
+  return ec_inject_test_error(
+    ghobject_t(o, ghobject_t::NO_GEN, shard_id_t::NO_SHARD),
+    &ec_inject_write_failures2);
+}
+
+bool ec_inject_test_write_error3(const hobject_t& o) {
+  return ec_inject_test_error(
+    ghobject_t(o, ghobject_t::NO_GEN, shard_id_t::NO_SHARD),
+    &ec_inject_write_failures3);
 }

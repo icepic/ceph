@@ -8,6 +8,7 @@
 #include <boost/intrusive_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ref_counter.hpp>
 
+#include "common/hobject.h"
 #include "include/byteorder.h"
 #include "seastore_types.h"
 
@@ -35,8 +36,8 @@ struct onode_layout_t {
 
   object_data_le_t object_data;
 
-  char oi[MAX_OI_LENGTH];
-  char ss[MAX_SS_LENGTH];
+  char oi[MAX_OI_LENGTH] = {0};
+  char ss[MAX_SS_LENGTH] = {0};
 } __attribute__((packed));
 
 class Transaction;
@@ -56,10 +57,12 @@ protected:
   virtual laddr_t get_hint() const = 0;
   const uint32_t default_metadata_offset = 0;
   const uint32_t default_metadata_range = 0;
+  const hobject_t hobj;
 public:
-  Onode(uint32_t ddr, uint32_t dmr)
+  Onode(uint32_t ddr, uint32_t dmr, const hobject_t &hobj)
     : default_metadata_offset(ddr),
-      default_metadata_range(dmr)
+      default_metadata_range(dmr),
+      hobj(hobj)
   {}
 
   virtual bool is_alive() const = 0;
@@ -79,12 +82,14 @@ public:
     assert(default_metadata_offset);
     assert(default_metadata_range);
     uint64_t range_blocks = default_metadata_range / block_size;
-    return get_hint() + default_metadata_offset +
-      (((uint32_t)std::rand() % range_blocks) * block_size);
+    auto random_offset = default_metadata_offset +
+        (((uint32_t)std::rand() % range_blocks) * block_size);
+    return (get_hint() + random_offset).checked_to_laddr();
   }
   laddr_t get_data_hint() const {
     return get_hint();
   }
+  friend std::ostream& operator<<(std::ostream &out, const Onode &rhs);
 };
 
 

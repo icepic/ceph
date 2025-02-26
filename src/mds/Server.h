@@ -129,8 +129,9 @@ public:
   version_t prepare_force_open_sessions(std::map<client_t,entity_inst_t> &cm,
 					std::map<client_t,client_metadata_t>& cmm,
 					std::map<client_t,std::pair<Session*,uint64_t> >& smap);
-  void finish_force_open_sessions(const std::map<client_t,std::pair<Session*,uint64_t> >& smap,
+  void finish_force_open_sessions(std::map<client_t,std::pair<Session*,uint64_t> >& smap,
 				  bool dec_import=true);
+  void close_forced_opened_sessions(const std::map<client_t,std::pair<Session*,uint64_t> >& smap);
   void flush_client_sessions(std::set<client_t>& client_set, MDSGatherBuilder& gather);
   void finish_flush_session(Session *session, version_t seq);
   void terminate_sessions();
@@ -160,6 +161,7 @@ public:
   void force_clients_readonly();
 
   // -- requests --
+  void set_reply_extra_bl(const cref_t<MClientRequest> &req, inodeno_t ino, bufferlist& extra_bl);
   void trim_completed_request_list(ceph_tid_t tid, Session *session);
   void handle_client_request(const cref_t<MClientRequest> &m);
   void handle_client_reply(const cref_t<MClientReply> &m);
@@ -232,8 +234,7 @@ public:
                           std::string name,
                           std::string value,
                           file_layout_t *layout);
-  void handle_set_vxattr(const MDRequestRef& mdr, CInode *cur);
-  void handle_remove_vxattr(const MDRequestRef& mdr, CInode *cur);
+  void handle_client_setvxattr(const MDRequestRef& mdr, CInode *cur);
   void handle_client_getvxattr(const MDRequestRef& mdr);
   void handle_client_setxattr(const MDRequestRef& mdr);
   void handle_client_removexattr(const MDRequestRef& mdr);
@@ -526,7 +527,7 @@ private:
   MDLog *mdlog;
   PerfCounters *logger = nullptr;
 
-  // OSDMap full status, used to generate CEPHFS_ENOSPC on some operations
+  // OSDMap full status, used to generate ENOSPC on some operations
   bool is_full = false;
 
   // State for while in reconnect
@@ -543,6 +544,7 @@ private:
   feature_bitset_t supported_metric_spec;
   feature_bitset_t required_client_features;
 
+  bool mds_allow_async_dirops = true;
   bool forward_all_requests_to_auth = false;
   bool replay_unsafe_with_closed_session = false;
   double cap_revoke_eviction_timeout = 0;

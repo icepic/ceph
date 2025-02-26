@@ -1310,9 +1310,9 @@ redirection on standby nodes.
     mode tcp
     option httpchk GET /
     http-check expect status 200
-    server x <HOST>:<PORT> ssl check verify none
-    server y <HOST>:<PORT> ssl check verify none
-    server z <HOST>:<PORT> ssl check verify none
+    server x <HOST>:<PORT> check check-ssl verify none
+    server y <HOST>:<PORT> check check-ssl verify none
+    server z <HOST>:<PORT> check check-ssl verify none
 
 .. _dashboard-auditing:
 
@@ -1441,9 +1441,9 @@ commands:
 
         /var/log/ceph/$cluster-$name.log
 
-#. Ensure the SSL/TSL support is configured properly:
+#. Ensure the SSL/TLS support is configured properly:
 
-   * Check if the SSL/TSL support is enabled:
+   * Check if the SSL/TLS support is enabled:
 
      .. prompt:: bash $
 

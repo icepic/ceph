@@ -8,7 +8,14 @@ import pytest
 
 from ceph.deployment.drive_group import DriveGroupSpec, DeviceSelection
 from cephadm.serve import CephadmServe
-from cephadm.inventory import HostCacheStatus, ClientKeyringSpec
+from cephadm.inventory import (
+    HostCacheStatus,
+    ClientKeyringSpec,
+    Cert,
+    PrivKey,
+    CERT_STORE_CERT_PREFIX,
+    CERT_STORE_KEY_PREFIX,
+)
 from cephadm.services.osd import OSD, OSDRemovalQueue, OsdIdClaims
 from cephadm.utils import SpecialHostLabels
 
@@ -129,7 +136,7 @@ def with_osd_daemon(cephadm_module: CephadmOrchestrator, _run_cephadm, host: str
         mock.call(host, 'osd', 'ceph-volume',
                   ['--', 'lvm', 'list', '--format', 'json'],
                   no_fsid=False, error_ok=False, image='', log_output=True, use_current_daemon_image=False),
-        mock.call(host, f'osd.{osd_id}', ['_orch', 'deploy'], [], stdin=mock.ANY, use_current_daemon_image=False),
+        mock.call(host, f'osd.{osd_id}', ['_orch', 'deploy'], [], stdin=mock.ANY, error_ok=True, use_current_daemon_image=False),
         mock.call(host, 'osd', 'ceph-volume',
                   ['--', 'raw', 'list', '--format', 'json'],
                   no_fsid=False, error_ok=False, image='', log_output=True, use_current_daemon_image=False),
@@ -151,6 +158,36 @@ class TestCephadm(object):
         match_glob(new_mon, 'myhost')
         new_mgr = cephadm_module.get_unique_name('mgr', 'myhost', existing)
         match_glob(new_mgr, 'myhost.*')
+
+    @mock.patch("cephadm.serve.CephadmServe._run_cephadm", _run_cephadm('[]'))
+    def test_valid_url(self, cephadm_module):
+        # Test with valid IPv4 and IPv6 urls
+        test_cases = [
+            ("http://192.168.100.100:9090", "prometheus multi-cluster targets updated"),  # Valid IPv4
+            ("https://192.168.100.100/prometheus", "prometheus multi-cluster targets updated"),       # Valid IPv4 without port
+            ("http://[2001:0db8:85a3::8a2e:0370:7334]:9090", "prometheus multi-cluster targets updated"),  # Valid IPv6 with port
+            ("https://[2001:0db8:85a3::8a2e:0370:7334]/prometheus", "prometheus multi-cluster targets updated"),  # Valid IPv6 without port
+        ]
+        with with_host(cephadm_module, 'test'):
+            with with_service(cephadm_module, ServiceSpec(service_type='prometheus'), CephadmOrchestrator.apply_prometheus, 'test'):
+                for url, expected_output in test_cases:
+                    c = cephadm_module.set_prometheus_target(url)
+                    assert wait(cephadm_module, c) == expected_output
+
+    @mock.patch("cephadm.serve.CephadmServe._run_cephadm", _run_cephadm('[]'))
+    def test_invalid_url(self, cephadm_module):
+        # Test with invalid IPv4 and IPv6 urls
+        test_cases = [
+            ("https://192.168.100.100:99999", "Invalid url. Port out of range 0-65535"),  # Port out of range
+            ("http://[2001:0db8:85a3::8a2e:0370:7334]:99999", "Invalid url. Port out of range 0-65535"),  # IPv6 with invalid port
+            ("https://192.168.100.999:9090", "Invalid url. '192.168.100.999' does not appear to be an IPv4 or IPv6 address"),  # Invalid IPv4
+            ("http://[fe80:2030:31:24]:9090", "Invalid url. 'fe80:2030:31:24' does not appear to be an IPv4 or IPv6 address")  # Invalid IPv6
+        ]
+        with with_host(cephadm_module, 'test'):
+            with with_service(cephadm_module, ServiceSpec(service_type='prometheus'), CephadmOrchestrator.apply_prometheus, 'test'):
+                for url, expected_output in test_cases:
+                    c = cephadm_module.set_prometheus_target(url)
+                    assert wait(cephadm_module, c) == expected_output
 
     @mock.patch("cephadm.serve.CephadmServe._run_cephadm", _run_cephadm('[]'))
     def test_host(self, cephadm_module):
@@ -339,8 +376,8 @@ class TestCephadm(object):
     ))
     def test_list_daemons(self, cephadm_module: CephadmOrchestrator):
         cephadm_module.service_cache_timeout = 10
-        with with_host(cephadm_module, 'test'):
-            CephadmServe(cephadm_module)._refresh_host_daemons('test')
+        with with_host(cephadm_module, 'myhost'):
+            CephadmServe(cephadm_module)._refresh_host_daemons('myhost')
             dds = wait(cephadm_module, cephadm_module.list_daemons())
             assert {d.name() for d in dds} == {'rgw.myrgw.foobar', 'haproxy.test.bar'}
 
@@ -462,7 +499,7 @@ class TestCephadm(object):
 
                 CephadmServe(cephadm_module)._check_daemons()
 
-                assert _save_host.called_with('test')
+                _save_host.assert_called_with('test')
                 assert cephadm_module.cache.get_scheduled_daemon_action('test', daemon_name) is None
 
     @mock.patch("cephadm.serve.CephadmServe._run_cephadm")
@@ -526,6 +563,7 @@ class TestCephadm(object):
                             },
                         },
                     }),
+                    error_ok=True,
                     use_current_daemon_image=True,
                 )
 
@@ -581,6 +619,7 @@ class TestCephadm(object):
                             "crush_location": "datacenter=a",
                         },
                     }),
+                    error_ok=True,
                     use_current_daemon_image=False,
                 )
 
@@ -623,6 +662,7 @@ class TestCephadm(object):
                             "keyring": "[client.crash.test]\nkey = None\n",
                         },
                     }),
+                    error_ok=True,
                     use_current_daemon_image=False,
                 )
 
@@ -665,6 +705,7 @@ class TestCephadm(object):
                         },
                         "config_blobs": {},
                     }),
+                    error_ok=True,
                     use_current_daemon_image=False,
                 )
 
@@ -715,6 +756,7 @@ class TestCephadm(object):
                         },
                         "config_blobs": {},
                     }),
+                    error_ok=True,
                     use_current_daemon_image=False,
                 )
 
@@ -769,6 +811,7 @@ class TestCephadm(object):
                         },
                         "config_blobs": {},
                     }),
+                    error_ok=True,
                     use_current_daemon_image=False,
                 )
 
@@ -847,7 +890,7 @@ class TestCephadm(object):
                 with mock.patch("cephadm.module.CephadmOrchestrator.mon_command") as _mon_cmd:
                     CephadmServe(cephadm_module)._check_daemons()
                     _mon_cmd.assert_any_call(
-                        {'prefix': 'dashboard set-grafana-api-url', 'value': 'https://[1::4]:3000'},
+                        {'prefix': 'dashboard set-grafana-api-url', 'value': 'https://host_fqdn:3000'},
                         None)
 
     @mock.patch("cephadm.serve.CephadmServe._run_cephadm", _run_cephadm('{}'))
@@ -979,7 +1022,7 @@ class TestCephadm(object):
         assert osd_claims.filtered_by_host('host1') == ['0']
         assert osd_claims.filtered_by_host('host1.domain.com') == ['0']
 
-    @ pytest.mark.parametrize(
+    @pytest.mark.parametrize(
         "ceph_services, cephadm_daemons, strays_expected, metadata",
         # [ ([(daemon_type, daemon_id), ... ], [...], [...]), ... ]
         [
@@ -1690,6 +1733,207 @@ class TestCephadm(object):
         assert cephadm_module.cache._get_host_cache_entry_status(
             'host.nothing.com') == HostCacheStatus.stray
 
+    @mock.patch("cephadm.module.CephadmOrchestrator.set_store")
+    def test_cert_store_save_cert(self, _set_store, cephadm_module: CephadmOrchestrator):
+        cephadm_module.cert_key_store._init_known_cert_key_dicts()
+
+        rgw_frontend_rgw_foo_host2_cert = 'fake-rgw-cert'
+        nvmeof_client_cert = 'fake-nvmeof-client-cert'
+        nvmeof_server_cert = 'fake-nvmeof-server-cert'
+        nvmeof_root_ca_cert = 'fake-nvmeof-root-ca-cert'
+        grafana_cert_host_1 = 'grafana-cert-host-1'
+        grafana_cert_host_2 = 'grafana-cert-host-2'
+        cephadm_module.cert_key_store.save_cert('rgw_frontend_ssl_cert', rgw_frontend_rgw_foo_host2_cert, service_name='rgw.foo', user_made=True)
+        cephadm_module.cert_key_store.save_cert('nvmeof_server_cert', nvmeof_server_cert, service_name='nvmeof.foo', user_made=True)
+        cephadm_module.cert_key_store.save_cert('nvmeof_client_cert', nvmeof_client_cert, service_name='nvmeof.foo', user_made=True)
+        cephadm_module.cert_key_store.save_cert('nvmeof_root_ca_cert', nvmeof_root_ca_cert, service_name='nvmeof.foo', user_made=True)
+        cephadm_module.cert_key_store.save_cert('grafana_cert', grafana_cert_host_1, host='host-1', user_made=True)
+        cephadm_module.cert_key_store.save_cert('grafana_cert', grafana_cert_host_2, host='host-2', user_made=True)
+
+        expected_calls = [
+            mock.call(f'{CERT_STORE_CERT_PREFIX}rgw_frontend_ssl_cert', json.dumps({'rgw.foo': Cert(rgw_frontend_rgw_foo_host2_cert, True).to_json()})),
+            mock.call(f'{CERT_STORE_CERT_PREFIX}nvmeof_server_cert', json.dumps({'nvmeof.foo': Cert(nvmeof_server_cert, True).to_json()})),
+            mock.call(f'{CERT_STORE_CERT_PREFIX}nvmeof_client_cert', json.dumps({'nvmeof.foo': Cert(nvmeof_client_cert, True).to_json()})),
+            mock.call(f'{CERT_STORE_CERT_PREFIX}nvmeof_root_ca_cert', json.dumps({'nvmeof.foo': Cert(nvmeof_root_ca_cert, True).to_json()})),
+            mock.call(f'{CERT_STORE_CERT_PREFIX}grafana_cert', json.dumps({'host-1': Cert(grafana_cert_host_1, True).to_json()})),
+            mock.call(f'{CERT_STORE_CERT_PREFIX}grafana_cert', json.dumps({'host-1': Cert(grafana_cert_host_1, True).to_json(),
+                                                                           'host-2': Cert(grafana_cert_host_2, True).to_json()}))
+        ]
+        _set_store.assert_has_calls(expected_calls)
+
+    @mock.patch("cephadm.module.CephadmOrchestrator.set_store")
+    def test_cert_store_cert_ls(self, _set_store, cephadm_module: CephadmOrchestrator):
+        cephadm_module.cert_key_store._init_known_cert_key_dicts()
+
+        expected_ls = {
+            'rgw_frontend_ssl_cert': False,
+            'iscsi_ssl_cert': False,
+            'ingress_ssl_cert': False,
+            'mgmt_gw_cert': False,
+            'oauth2_proxy_cert': False,
+            'cephadm_root_ca_cert': False,
+            'grafana_cert': False,
+            'nvmeof_client_cert': False,
+            'nvmeof_server_cert': False,
+            'nvmeof_root_ca_cert': False,
+        }
+        assert cephadm_module.cert_key_store.cert_ls() == expected_ls
+
+        cephadm_module.cert_key_store.save_cert('rgw_frontend_ssl_cert', 'xxx', service_name='rgw.foo', user_made=True)
+        cephadm_module.cert_key_store.save_cert('rgw_frontend_ssl_cert', 'xxx', service_name='rgw.bar', user_made=True)
+        expected_ls['rgw_frontend_ssl_cert'] = {}
+        expected_ls['rgw_frontend_ssl_cert']['rgw.foo'] = True
+        expected_ls['rgw_frontend_ssl_cert']['rgw.bar'] = True
+        assert cephadm_module.cert_key_store.cert_ls() == expected_ls
+
+        cephadm_module.cert_key_store.save_cert('nvmeof_client_cert', 'xxx', service_name='nvmeof.foo', user_made=True)
+        cephadm_module.cert_key_store.save_cert('nvmeof_server_cert', 'xxx', service_name='nvmeof.foo', user_made=True)
+        cephadm_module.cert_key_store.save_cert('nvmeof_root_ca_cert', 'xxx', service_name='nvmeof.foo', user_made=True)
+        expected_ls['nvmeof_client_cert'] = {}
+        expected_ls['nvmeof_client_cert']['nvmeof.foo'] = True
+        expected_ls['nvmeof_server_cert'] = {}
+        expected_ls['nvmeof_server_cert']['nvmeof.foo'] = True
+        expected_ls['nvmeof_root_ca_cert'] = {}
+        expected_ls['nvmeof_root_ca_cert']['nvmeof.foo'] = True
+        assert cephadm_module.cert_key_store.cert_ls() == expected_ls
+
+    @mock.patch("cephadm.module.CephadmOrchestrator.set_store")
+    def test_cert_store_save_key(self, _set_store, cephadm_module: CephadmOrchestrator):
+        cephadm_module.cert_key_store._init_known_cert_key_dicts()
+
+        grafana_host1_key = 'fake-grafana-host1-key'
+        grafana_host2_key = 'fake-grafana-host2-key'
+        nvmeof_client_key = 'nvmeof-client-key'
+        nvmeof_server_key = 'nvmeof-server-key'
+        nvmeof_encryption_key = 'nvmeof-encryption-key'
+        cephadm_module.cert_key_store.save_key('grafana_key', grafana_host1_key, host='host1')
+        cephadm_module.cert_key_store.save_key('grafana_key', grafana_host2_key, host='host2')
+        cephadm_module.cert_key_store.save_key('nvmeof_client_key', nvmeof_client_key, service_name='nvmeof.foo')
+        cephadm_module.cert_key_store.save_key('nvmeof_server_key', nvmeof_server_key, service_name='nvmeof.foo')
+        cephadm_module.cert_key_store.save_key('nvmeof_encryption_key', nvmeof_encryption_key, service_name='nvmeof.foo')
+
+        expected_calls = [
+            mock.call(f'{CERT_STORE_KEY_PREFIX}grafana_key', json.dumps({'host1': PrivKey(grafana_host1_key).to_json()})),
+            mock.call(f'{CERT_STORE_KEY_PREFIX}grafana_key', json.dumps({'host1': PrivKey(grafana_host1_key).to_json(),
+                                                                         'host2': PrivKey(grafana_host2_key).to_json()})),
+            mock.call(f'{CERT_STORE_KEY_PREFIX}nvmeof_client_key', json.dumps({'nvmeof.foo': PrivKey(nvmeof_client_key).to_json()})),
+            mock.call(f'{CERT_STORE_KEY_PREFIX}nvmeof_server_key', json.dumps({'nvmeof.foo': PrivKey(nvmeof_server_key).to_json()})),
+            mock.call(f'{CERT_STORE_KEY_PREFIX}nvmeof_encryption_key', json.dumps({'nvmeof.foo': PrivKey(nvmeof_encryption_key).to_json()})),
+        ]
+        _set_store.assert_has_calls(expected_calls)
+
+    @mock.patch("cephadm.module.CephadmOrchestrator.set_store")
+    def test_cert_store_key_ls(self, _set_store, cephadm_module: CephadmOrchestrator):
+        cephadm_module.cert_key_store._init_known_cert_key_dicts()
+
+        expected_ls = {
+            'grafana_key': False,
+            'mgmt_gw_key': False,
+            'oauth2_proxy_key': False,
+            'cephadm_root_ca_key': False,
+            'iscsi_ssl_key': False,
+            'ingress_ssl_key': False,
+            'nvmeof_client_key': False,
+            'nvmeof_server_key': False,
+            'nvmeof_encryption_key': False,
+        }
+        assert cephadm_module.cert_key_store.key_ls() == expected_ls
+
+        cephadm_module.cert_key_store.save_key('nvmeof_client_key', 'xxx', service_name='nvmeof.foo')
+        cephadm_module.cert_key_store.save_key('nvmeof_server_key', 'xxx', service_name='nvmeof.foo')
+        cephadm_module.cert_key_store.save_key('nvmeof_encryption_key', 'xxx', service_name='nvmeof.foo')
+        expected_ls['nvmeof_server_key'] = {}
+        expected_ls['nvmeof_server_key']['nvmeof.foo'] = True
+        expected_ls['nvmeof_client_key'] = {}
+        expected_ls['nvmeof_client_key']['nvmeof.foo'] = True
+        expected_ls['nvmeof_encryption_key'] = {}
+        expected_ls['nvmeof_encryption_key']['nvmeof.foo'] = True
+        assert cephadm_module.cert_key_store.key_ls() == expected_ls
+
+    @mock.patch("cephadm.module.CephadmOrchestrator.get_store_prefix")
+    def test_cert_store_load(self, _get_store_prefix, cephadm_module: CephadmOrchestrator):
+        cephadm_module.cert_key_store._init_known_cert_key_dicts()
+
+        rgw_frontend_rgw_foo_host2_cert = 'fake-rgw-cert'
+        grafana_host1_key = 'fake-grafana-host1-cert'
+        nvmeof_server_cert = 'nvmeof-server-cert'
+        nvmeof_client_cert = 'nvmeof-client-cert'
+        nvmeof_root_ca_cert = 'nvmeof-root-ca-cert'
+        nvmeof_server_key = 'nvmeof-server-key'
+        nvmeof_client_key = 'nvmeof-client-key'
+        nvmeof_encryption_key = 'nvmeof-encryption-key'
+
+        def _fake_prefix_store(key):
+            if key == 'cert_store.cert.':
+                return {
+                    f'{CERT_STORE_CERT_PREFIX}rgw_frontend_ssl_cert': json.dumps({'rgw.foo': Cert(rgw_frontend_rgw_foo_host2_cert, True).to_json()}),
+                    f'{CERT_STORE_CERT_PREFIX}nvmeof_server_cert': json.dumps({'nvmeof.foo': Cert(nvmeof_server_cert, True).to_json()}),
+                    f'{CERT_STORE_CERT_PREFIX}nvmeof_client_cert': json.dumps({'nvmeof.foo': Cert(nvmeof_client_cert, True).to_json()}),
+                    f'{CERT_STORE_CERT_PREFIX}nvmeof_root_ca_cert': json.dumps({'nvmeof.foo': Cert(nvmeof_root_ca_cert, True).to_json()}),
+                }
+            elif key == 'cert_store.key.':
+                return {
+                    f'{CERT_STORE_KEY_PREFIX}grafana_key': json.dumps({'host1': PrivKey(grafana_host1_key).to_json()}),
+                    f'{CERT_STORE_KEY_PREFIX}nvmeof_server_key': json.dumps({'nvmeof.foo': PrivKey(nvmeof_server_key).to_json()}),
+                    f'{CERT_STORE_KEY_PREFIX}nvmeof_client_key': json.dumps({'nvmeof.foo': PrivKey(nvmeof_client_key).to_json()}),
+                    f'{CERT_STORE_KEY_PREFIX}nvmeof_encryption_key': json.dumps({'nvmeof.foo': PrivKey(nvmeof_encryption_key).to_json()}),
+                }
+            else:
+                raise Exception(f'Get store with unexpected value {key}')
+
+        _get_store_prefix.side_effect = _fake_prefix_store
+        cephadm_module.cert_key_store.load()
+        assert cephadm_module.cert_key_store.known_certs['rgw_frontend_ssl_cert']['rgw.foo'] == Cert(rgw_frontend_rgw_foo_host2_cert, True)
+        assert cephadm_module.cert_key_store.known_certs['nvmeof_server_cert']['nvmeof.foo'] == Cert(nvmeof_server_cert, True)
+        assert cephadm_module.cert_key_store.known_certs['nvmeof_client_cert']['nvmeof.foo'] == Cert(nvmeof_client_cert, True)
+        assert cephadm_module.cert_key_store.known_certs['nvmeof_root_ca_cert']['nvmeof.foo'] == Cert(nvmeof_root_ca_cert, True)
+        assert cephadm_module.cert_key_store.known_keys['grafana_key']['host1'] == PrivKey(grafana_host1_key)
+        assert cephadm_module.cert_key_store.known_keys['nvmeof_server_key']['nvmeof.foo'] == PrivKey(nvmeof_server_key)
+        assert cephadm_module.cert_key_store.known_keys['nvmeof_client_key']['nvmeof.foo'] == PrivKey(nvmeof_client_key)
+        assert cephadm_module.cert_key_store.known_keys['nvmeof_encryption_key']['nvmeof.foo'] == PrivKey(nvmeof_encryption_key)
+
+    def test_cert_store_get_cert_key(self, cephadm_module: CephadmOrchestrator):
+        cephadm_module.cert_key_store._init_known_cert_key_dicts()
+
+        rgw_frontend_rgw_foo_host2_cert = 'fake-rgw-cert'
+        nvmeof_client_cert = 'fake-nvmeof-client-cert'
+        nvmeof_server_cert = 'fake-nvmeof-server-cert'
+        cephadm_module.cert_key_store.save_cert('rgw_frontend_ssl_cert', rgw_frontend_rgw_foo_host2_cert, service_name='rgw.foo', user_made=True)
+        cephadm_module.cert_key_store.save_cert('nvmeof_server_cert', nvmeof_server_cert, service_name='nvmeof.foo', user_made=True)
+        cephadm_module.cert_key_store.save_cert('nvmeof_client_cert', nvmeof_client_cert, service_name='nvmeof.foo', user_made=True)
+
+        assert cephadm_module.cert_key_store.get_cert('rgw_frontend_ssl_cert', service_name='rgw.foo') == rgw_frontend_rgw_foo_host2_cert
+        assert cephadm_module.cert_key_store.get_cert('nvmeof_server_cert', service_name='nvmeof.foo') == nvmeof_server_cert
+        assert cephadm_module.cert_key_store.get_cert('nvmeof_client_cert', service_name='nvmeof.foo') == nvmeof_client_cert
+        assert cephadm_module.cert_key_store.get_cert('grafana_cert', host='host1') == ''
+        assert cephadm_module.cert_key_store.get_cert('iscsi_ssl_cert', service_name='iscsi.foo') == ''
+        assert cephadm_module.cert_key_store.get_cert('nvmeof_root_ca_cert', service_name='nvmeof.foo') == ''
+
+        with pytest.raises(OrchestratorError, match='Attempted to access cert for unknown entity'):
+            cephadm_module.cert_key_store.get_cert('unknown_entity')
+        with pytest.raises(OrchestratorError, match='Need host to access cert for entity'):
+            cephadm_module.cert_key_store.get_cert('grafana_cert')
+        with pytest.raises(OrchestratorError, match='Need service name to access cert for entity'):
+            cephadm_module.cert_key_store.get_cert('rgw_frontend_ssl_cert', host='foo')
+
+        grafana_host1_key = 'fake-grafana-host1-cert'
+        nvmeof_server_key = 'nvmeof-server-key'
+        nvmeof_encryption_key = 'nvmeof-encryption-key'
+        cephadm_module.cert_key_store.save_key('grafana_key', grafana_host1_key, host='host1')
+        cephadm_module.cert_key_store.save_key('grafana_key', grafana_host1_key, host='host1')
+        cephadm_module.cert_key_store.save_key('nvmeof_server_key', nvmeof_server_key, service_name='nvmeof.foo')
+        cephadm_module.cert_key_store.save_key('nvmeof_encryption_key', nvmeof_encryption_key, service_name='nvmeof.foo')
+
+        assert cephadm_module.cert_key_store.get_key('grafana_key', host='host1') == grafana_host1_key
+        assert cephadm_module.cert_key_store.get_key('nvmeof_server_key', service_name='nvmeof.foo') == nvmeof_server_key
+        assert cephadm_module.cert_key_store.get_key('nvmeof_client_key', service_name='nvmeof.foo') == ''
+        assert cephadm_module.cert_key_store.get_key('nvmeof_encryption_key', service_name='nvmeof.foo') == nvmeof_encryption_key
+
+        with pytest.raises(OrchestratorError, match='Attempted to access priv key for unknown entity'):
+            cephadm_module.cert_key_store.get_key('unknown_entity')
+        with pytest.raises(OrchestratorError, match='Need host to access priv key for entity'):
+            cephadm_module.cert_key_store.get_key('grafana_key')
+
     @mock.patch("cephadm.serve.CephadmServe._run_cephadm", _run_cephadm('{}'))
     @mock.patch("cephadm.services.nfs.NFSService.run_grace_tool", mock.MagicMock())
     @mock.patch("cephadm.services.nfs.NFSService.purge", mock.MagicMock())
@@ -1825,7 +2069,7 @@ class TestCephadm(object):
             ), CephadmOrchestrator.apply_iscsi),
             (CustomContainerSpec(
                 service_id='hello-world',
-                image='docker.io/library/hello-world:latest',
+                image='quay.io/hello-world/hello-world:latest',
                 uid=65534,
                 gid=65534,
                 dirs=['foo/bar'],
@@ -2505,6 +2749,7 @@ Traceback (most recent call last):
             cephadm_module.cache.facts = facts
             assert cephadm_module._validate_tunedprofile_settings(spec) == expected_value
 
+    @mock.patch("cephadm.CephadmOrchestrator.set_maintenance_healthcheck", lambda _: None)
     @mock.patch("cephadm.serve.CephadmServe._run_cephadm", _run_cephadm('[]'))
     def test_tuned_profiles_validation(self, cephadm_module):
         with with_host(cephadm_module, 'test'):
@@ -2625,16 +2870,23 @@ Traceback (most recent call last):
             with cephadm_module.async_timeout_handler('hostC', 'very slow', 999):
                 cephadm_module.wait_async(_timeout())
 
+    @mock.patch("cephadm.serve.CephadmServe._run_cephadm", _run_cephadm('[]'))
     @mock.patch("cephadm.CephadmOrchestrator.remove_osds")
     @mock.patch("cephadm.CephadmOrchestrator.add_host_label", lambda *a, **kw: None)
     @mock.patch("cephadm.inventory.HostCache.get_daemons_by_host", lambda *a, **kw: [])
     def test_host_drain_zap(self, _rm_osds, cephadm_module):
         # pass force=true in these tests to bypass _admin label check
-        cephadm_module.drain_host('host1', force=True, zap_osd_devices=False)
-        assert _rm_osds.called_with([], zap=False)
+        with with_host(cephadm_module, 'test', refresh_hosts=False, rm_with_force=True):
+            cephadm_module.drain_host('test', force=True, zap_osd_devices=False)
+            _rm_osds.assert_called_with([], zap=False)
 
-        cephadm_module.drain_host('host1', force=True, zap_osd_devices=True)
-        assert _rm_osds.called_with([], zap=True)
+        with with_host(cephadm_module, 'test', refresh_hosts=False, rm_with_force=True):
+            cephadm_module.drain_host('test', force=True, zap_osd_devices=True)
+            _rm_osds.assert_called_with([], zap=True)
+
+        with pytest.raises(OrchestratorError, match=r"Cannot find host 'host1' in the inventory."):
+            cephadm_module.drain_host('host1', force=True, zap_osd_devices=True)
+            _rm_osds.assert_called_with([], zap=True)
 
     def test_process_ls_output(self, cephadm_module):
         sample_ls_output = """[

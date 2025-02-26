@@ -15,8 +15,10 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <shared_mutex> // for std::shared_lock
 #include <boost/lockfree/queue.hpp>
 #include <boost/functional/hash.hpp>
+#include "common/Clock.h" // for ceph_clock_now()
 #include "common/dout.h"
 #include <openssl/ssl.h>
 
@@ -513,10 +515,10 @@ bool new_state(connection_t* conn, const connection_id_t& conn_id) {
 
 /// struct used for holding messages in the message queue
 struct message_wrapper_t {
-  connection_id_t conn_id;
-  std::string topic;
-  std::string message;
-  reply_callback_t cb;
+  const connection_id_t conn_id;
+  const std::string topic;
+  const std::string message;
+  const reply_callback_t cb;
 
   message_wrapper_t(const connection_id_t& _conn_id,
       const std::string& _topic,
@@ -535,9 +537,12 @@ typedef boost::lockfree::queue<message_wrapper_t*, boost::lockfree::fixed_sized<
           continue;
 
 #define ERASE_AND_CONTINUE(IT,CONTAINER) \
-          IT=CONTAINER.erase(IT); \
-          --connection_count; \
-          continue;
+          { \
+            std::lock_guard lock(connections_lock); \
+            IT=CONTAINER.erase(IT); \
+            --connection_count; \
+            continue; \
+          }
 
 class Manager {
 public:
@@ -647,6 +652,9 @@ private:
   // (4) TODO reconnect on connection errors
   // (5) TODO cleanup timedout callbacks
   void run() noexcept {
+    // give the runner thread a name for easier debugging
+    ceph_pthread_setname("amqp_manager");
+
     amqp_frame_t frame;
     while (!stopped) {
 
@@ -835,9 +843,6 @@ public:
       // This is to prevent rehashing so that iterators are not invalidated
       // when a new connection is added.
       connections.max_load_factor(10.0);
-      // give the runner thread a name for easier debugging
-      const auto rc = ceph_pthread_setname(runner.native_handle(), "amqp_manager");
-      ceph_assert(rc==0);
   }
 
   // non copyable
@@ -883,12 +888,14 @@ public:
     }
     // if error occurred during creation the creation will be retried in the main thread
     ++connection_count;
-    auto conn = connections.emplace(tmp_id, std::make_unique<connection_t>(cct, info, verify_ssl, ca_location)).first->second.get();
-    ldout(cct, 10) << "AMQP connect: new connection is created. Total connections: " << connection_count << dendl;
-    if (!new_state(conn, tmp_id)) {
-      ldout(cct, 1) << "AMQP connect: new connection '" << to_string(tmp_id) << "' is created. but state creation failed (will retry). error: " <<
-        status_to_string(conn->status) << " (" << conn->reply_code << ")"  << dendl;
+    auto conn = std::make_unique<connection_t>(cct, info, verify_ssl, ca_location);
+    if (new_state(conn.get(), tmp_id)) {
+        ldout(cct, 10) << "AMQP connect: new connection is created. Total connections: " << connection_count << dendl;
+    } else {
+        ldout(cct, 1) << "AMQP connect: new connection '" << to_string(tmp_id) << "' is created. but state creation failed (will retry). error: " <<
+            status_to_string(conn->status) << " (" << conn->reply_code << ")"  << dendl;
     }
+    connections.emplace(tmp_id, std::move(conn));
     id = std::move(tmp_id);
     return true;
   }

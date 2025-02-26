@@ -106,7 +106,7 @@ public:
     const eversion_t &at_version,
     PGTransactionUPtr &&t,
     const eversion_t &trim_to,
-    const eversion_t &min_last_complete_ondisk,
+    const eversion_t &pg_committed_to,
     std::vector<pg_log_entry_t>&& log_entries,
     std::optional<pg_hit_set_history_t> &hset_history,
     Context *on_all_commit,
@@ -141,15 +141,14 @@ public:
    * check_recovery_sources.
    */
   void objects_read_and_reconstruct(
-    const std::map<hobject_t, std::list<boost::tuple<uint64_t, uint64_t, uint32_t> >
-    > &reads,
+    const std::map<hobject_t, std::list<ECCommon::ec_align_t>> &reads,
     bool fast_read,
-    GenContextURef<std::map<hobject_t,std::pair<int, extent_map> > &&> &&func) override;
+    GenContextURef<ECCommon::ec_extents_t &&> &&func) override;
 
   void objects_read_async(
     const hobject_t &hoid,
-    const std::list<std::pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
-		    std::pair<ceph::buffer::list*, Context*> > > &to_read,
+    const std::list<std::pair<ECCommon::ec_align_t,
+                              std::pair<ceph::buffer::list*, Context*>>> &to_read,
     Context *on_complete,
     bool fast_read = false) override;
 

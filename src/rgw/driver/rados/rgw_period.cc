@@ -68,20 +68,6 @@ int RGWPeriod::delete_obj(const DoutPrefixProvider *dpp, optional_yield y)
   return ret;
 }
 
-int RGWPeriod::add_zonegroup(const DoutPrefixProvider *dpp, const RGWZoneGroup& zonegroup, optional_yield y)
-{
-  if (zonegroup.realm_id != realm_id) {
-    return 0;
-  }
-  int ret = period_map.update(zonegroup, cct);
-  if (ret < 0) {
-    ldpp_dout(dpp, 0) << "ERROR: updating period map: " << cpp_strerror(-ret) << dendl;
-    return ret;
-  }
-
-  return store_info(dpp, false, y);
-}
-
 int RGWPeriod::update(const DoutPrefixProvider *dpp, optional_yield y)
 {
   auto zone_svc = sysobj_svc->get_zone_svc();
@@ -271,7 +257,6 @@ int RGWPeriod::commit(const DoutPrefixProvider *dpp,
     }
     ldpp_dout(dpp, 4) << "Promoted to master zone and committed new period "
         << id << dendl;
-    realm.notify_new_period(dpp, *this, y);
     return 0;
   }
   // period must be based on current epoch
@@ -295,10 +280,6 @@ int RGWPeriod::commit(const DoutPrefixProvider *dpp,
   }
   // set as latest epoch
   r = update_latest_epoch(dpp, epoch, y);
-  if (r == -EEXIST) {
-    // already have this epoch (or a more recent one)
-    return 0;
-  }
   if (r < 0) {
     ldpp_dout(dpp, 0) << "failed to set latest epoch: " << cpp_strerror(-r) << dendl;
     return r;
@@ -310,7 +291,6 @@ int RGWPeriod::commit(const DoutPrefixProvider *dpp,
   }
   ldpp_dout(dpp, 4) << "Committed new epoch " << epoch
       << " for period " << id << dendl;
-  realm.notify_new_period(dpp, *this, y);
   return 0;
 }
 

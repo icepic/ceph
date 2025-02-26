@@ -36,13 +36,13 @@ struct FLTreeOnode final : Onode, Value {
   FLTreeOnode& operator=(const FLTreeOnode&) = delete;
 
   template <typename... T>
-  FLTreeOnode(uint32_t ddr, uint32_t dmr, T&&... args)
-    : Onode(ddr, dmr),
+  FLTreeOnode(uint32_t ddr, uint32_t dmr, const hobject_t &hobj, T&&... args)
+    : Onode(ddr, dmr, hobj),
       Value(std::forward<T>(args)...) {}
 
   template <typename... T>
-  FLTreeOnode(T&&... args)
-    : Onode(0, 0),
+  FLTreeOnode(const hobject_t &hobj, T&&... args)
+    : Onode(0, 0, hobj),
       Value(std::forward<T>(args)...) {}
 
   struct Recorder : public ValueDeltaRecorder {
@@ -66,7 +66,7 @@ struct FLTreeOnode final : Onode, Value {
     void apply_value_delta(
       ceph::bufferlist::const_iterator &bliter,
       NodeExtentMutable &value,
-      laddr_t value_addr) final;
+      laddr_offset_t value_addr_offset) final;
 
     void encode_update(NodeExtentMutable &payload_mut, delta_op_t op);
   };

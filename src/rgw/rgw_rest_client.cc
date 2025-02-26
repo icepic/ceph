@@ -209,7 +209,7 @@ static int sign_request_v2(const DoutPrefixProvider *dpp, const RGWAccessKey& ke
   }
 
   string canonical_header;
-  if (!rgw_create_s3_canonical_header(dpp, info, NULL, canonical_header, false)) {
+  if (!rgw_create_s3_canonical_header(dpp, RGW_OP_UNKNOWN, info, NULL, canonical_header, false)) {
     ldpp_dout(dpp, 0) << "failed to create canonical s3 header" << dendl;
     return -EINVAL;
   }
@@ -452,7 +452,7 @@ int RGWRESTSimpleRequest::forward_request(const DoutPrefixProvider *dpp, const R
   method = new_info.method;
   url = new_url;
 
-  int r = process(y);
+  int r = process(dpp, y);
   if (r < 0){
     if (r == -EINVAL){
       // curl_easy has errored, generally means the service is not available
@@ -922,14 +922,15 @@ int RGWRESTStreamRWRequest::send(RGWHTTPManager *mgr)
   return RGWHTTPStreamRWRequest::send(mgr);
 }
 
-int RGWHTTPStreamRWRequest::complete_request(optional_yield y,
+int RGWHTTPStreamRWRequest::complete_request(const DoutPrefixProvider* dpp,
+                                             optional_yield y,
                                              string *etag,
                                              real_time *mtime,
                                              uint64_t *psize,
                                              map<string, string> *pattrs,
                                              map<string, string> *pheaders)
 {
-  int ret = wait(y);
+  int ret = wait(dpp, y);
   if (ret < 0) {
     return ret;
   }

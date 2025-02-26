@@ -132,7 +132,7 @@ ECBackend::ECBackend(
     rmw_pipeline(cct, ec_impl, this->sinfo, get_parent()->get_eclistener(), *this),
     recovery_backend(cct, this->coll, ec_impl, this->sinfo, read_pipeline, unstable_hashinfo_registry, get_parent(), this),
     ec_impl(ec_impl),
-    sinfo(ec_impl->get_data_chunk_count(), stripe_width),
+    sinfo(ec_impl, stripe_width),
     unstable_hashinfo_registry(cct, ec_impl) {
   ceph_assert((ec_impl->get_data_chunk_count() *
 	  ec_impl->get_chunk_size(stripe_width)) == stripe_width);
@@ -195,8 +195,8 @@ struct RecoveryMessages {
     const map<pg_shard_t, vector<pair<int, int>>> &need,
     bool attrs)
   {
-    list<boost::tuple<uint64_t, uint64_t, uint32_t> > to_read;
-    to_read.push_back(boost::make_tuple(off, len, 0));
+    list<ECCommon::ec_align_t> to_read;
+    to_read.emplace_back(ECCommon::ec_align_t{off, len, 0});
     ceph_assert(!recovery_reads.count(hoid));
     want_to_read.insert(make_pair(hoid, std::move(_want_to_read)));
     recovery_reads.insert(
@@ -229,28 +229,20 @@ void ECBackend::handle_recovery_push(
 
   recovery_backend.handle_recovery_push(op, m, is_repair);
 
-  if (op.after_progress.data_complete) {
-    if ((get_parent()->pgb_is_primary())) {
-      if (get_parent()->pg_is_repair() || is_repair)
-        get_parent()->inc_osd_stat_repaired();
-    } else {
-      // If primary told us this is a repair, bump osd_stat_t::num_objects_repaired
-      if (is_repair)
-        get_parent()->inc_osd_stat_repaired();
-      if (get_parent()->pg_is_remote_backfilling()) {
-        struct stat st;
-        int r = store->stat(ch, ghobject_t(op.soid, ghobject_t::NO_GEN,
-                            get_parent()->whoami_shard().shard), &st);
-        if (r == 0) {
-          get_parent()->pg_sub_local_num_bytes(st.st_size);
-         // XXX: This can be way overestimated for small objects
-         get_parent()->pg_sub_num_bytes(st.st_size * get_ec_data_chunk_count());
-         dout(10) << __func__ << " " << op.soid
-                  << " sub actual data by " << st.st_size
-                  << " sub num_bytes by " << st.st_size * get_ec_data_chunk_count()
-                  << dendl;
-        }
-      }
+  if (op.after_progress.data_complete &&
+     !(get_parent()->pgb_is_primary()) &&
+     get_parent()->pg_is_remote_backfilling()) {
+    struct stat st;
+    int r = store->stat(ch, ghobject_t(op.soid, ghobject_t::NO_GEN,
+                        get_parent()->whoami_shard().shard), &st);
+    if (r == 0) {
+      get_parent()->pg_sub_local_num_bytes(st.st_size);
+      // XXX: This can be way overestimated for small objects
+      get_parent()->pg_sub_num_bytes(st.st_size * get_ec_data_chunk_count());
+      dout(10) << __func__ << " " << op.soid
+               << " sub actual data by " << st.st_size
+               << " sub num_bytes by " << st.st_size * get_ec_data_chunk_count()
+               << dendl;
     }
   }
 }
@@ -471,7 +463,8 @@ struct RecoveryReadCompleter : ECCommon::ReadCompleter {
   void finish_single_request(
     const hobject_t &hoid,
     ECCommon::read_result_t &res,
-    list<boost::tuple<uint64_t, uint64_t, uint32_t> >) override
+    list<ECCommon::ec_align_t>,
+    set<int> wanted_to_read) override
   {
     if (!(res.r == 0 && res.errors.empty())) {
       backend._failed_push(hoid, res);
@@ -952,6 +945,10 @@ void ECBackend::handle_sub_write(
   }
   trace.event("handle_sub_write");
 
+  if (cct->_conf->bluestore_debug_inject_read_err &&
+      ec_inject_test_write_error3(op.soid)) {
+    ceph_abort_msg("Error inject - OSD down");
+  }
   if (!get_parent()->pgb_is_primary())
     get_parent()->update_stats(op.stats);
   ObjectStore::Transaction localt;
@@ -990,15 +987,14 @@ void ECBackend::handle_sub_write(
     std::move(op.log_entries),
     op.updated_hit_set_history,
     op.trim_to,
-    op.roll_forward_to,
-    op.roll_forward_to,
+    op.pg_committed_to,
+    op.pg_committed_to,
     !op.backfill_or_async_recovery,
     localt,
     async);
 
   if (!get_parent()->pg_is_undersized() &&
-      (unsigned)get_parent()->whoami_shard().shard >=
-      ec_impl->get_data_chunk_count())
+      (unsigned)get_parent()->whoami_shard().shard >= sinfo.get_k())
     op.t.set_fadvise_flag(CEPH_OSD_OP_FLAG_FADVISE_DONTNEED);
 
   localt.register_on_commit(
@@ -1036,7 +1032,7 @@ void ECBackend::handle_sub_read(
       if ((op.subchunks.find(i->first)->second.size() == 1) && 
           (op.subchunks.find(i->first)->second.front().second == 
                                             ec_impl->get_sub_chunk_count())) {
-        dout(25) << __func__ << " case1: reading the complete chunk/shard." << dendl;
+        dout(20) << __func__ << " case1: reading the complete chunk/shard." << dendl;
         r = store->read(
 	  ch,
 	  ghobject_t(i->first, ghobject_t::NO_GEN, shard),
@@ -1044,9 +1040,11 @@ void ECBackend::handle_sub_read(
 	  j->get<1>(),
 	  bl, j->get<2>()); // Allow EIO return
       } else {
-        dout(25) << __func__ << " case2: going to do fragmented read." << dendl;
         int subchunk_size =
           sinfo.get_chunk_size() / ec_impl->get_sub_chunk_count();
+        dout(20) << __func__ << " case2: going to do fragmented read;"
+		 << " subchunk_size=" << subchunk_size
+		 << " chunk_size=" << sinfo.get_chunk_size() << dendl;
         bool error = false;
         for (int m = 0; m < (int)j->get<1>() && !error;
              m += sinfo.get_chunk_size()) {
@@ -1196,6 +1194,15 @@ void ECBackend::handle_sub_write_reply(
     i->second->on_all_commit = 0;
     i->second->trace.event("ec write all committed");
   }
+  if (cct->_conf->bluestore_debug_inject_read_err &&
+      (i->second->pending_commit.size() == 1) &&
+      ec_inject_test_write_error2(i->second->hoid)) {
+    std::string cmd =
+      "{ \"prefix\": \"osd down\", \"ids\": [\"" + std::to_string( get_parent()->whoami() ) + "\"] }";
+    vector<std::string> vcmd{cmd};
+    dout(0) << __func__ << " Error inject - marking OSD down" << dendl;
+    get_parent()->start_mon_command(vcmd, {}, nullptr, nullptr, nullptr);
+  }
   rmw_pipeline.check_ops();
 }
 
@@ -1213,6 +1220,19 @@ void ECBackend::handle_sub_read_reply(
     return;
   }
   ReadOp &rop = iter->second;
+  if (cct->_conf->bluestore_debug_inject_read_err) {
+    for (auto i = op.buffers_read.begin();
+	 i != op.buffers_read.end();
+	 ++i) {
+      if (ec_inject_test_read_error0(ghobject_t(i->first, ghobject_t::NO_GEN, op.from.shard))) {
+	dout(0) << __func__ << " Error inject - EIO error for shard " << op.from.shard << dendl;
+	op.buffers_read.erase(i->first);
+	op.attrs_read.erase(i->first);
+	op.errors[i->first] = -EIO;
+      }
+
+    }
+  }
   for (auto i = op.buffers_read.begin();
        i != op.buffers_read.end();
        ++i) {
@@ -1222,7 +1242,7 @@ void ECBackend::handle_sub_read_reply(
       dout(20) << __func__ << " to_read skipping" << dendl;
       continue;
     }
-    list<boost::tuple<uint64_t, uint64_t, uint32_t> >::const_iterator req_iter =
+    list<ec_align_t>::const_iterator req_iter =
       rop.to_read.find(i->first)->second.to_read.begin();
     list<
       boost::tuple<
@@ -1233,10 +1253,10 @@ void ECBackend::handle_sub_read_reply(
 	 ++j, ++req_iter, ++riter) {
       ceph_assert(req_iter != rop.to_read.find(i->first)->second.to_read.end());
       ceph_assert(riter != rop.complete[i->first].returned.end());
-      pair<uint64_t, uint64_t> adjusted =
-	sinfo.aligned_offset_len_to_chunk(
-	  make_pair(req_iter->get<0>(), req_iter->get<1>()));
-      ceph_assert(adjusted.first == j->first);
+      pair<uint64_t, uint64_t> aligned =
+	sinfo.chunk_aligned_offset_len_to_chunk(
+	  make_pair(req_iter->offset, req_iter->size));
+      ceph_assert(aligned.first == j->first);
       riter->get<2>()[from] = std::move(j->second);
     }
   }
@@ -1475,7 +1495,7 @@ void ECBackend::submit_transaction(
   const eversion_t &at_version,
   PGTransactionUPtr &&t,
   const eversion_t &trim_to,
-  const eversion_t &min_last_complete_ondisk,
+  const eversion_t &pg_committed_to,
   vector<pg_log_entry_t>&& log_entries,
   std::optional<pg_hit_set_history_t> &hset_history,
   Context *on_all_commit,
@@ -1490,7 +1510,15 @@ void ECBackend::submit_transaction(
   op->delta_stats = delta_stats;
   op->version = at_version;
   op->trim_to = trim_to;
-  op->roll_forward_to = std::max(min_last_complete_ondisk, rmw_pipeline.committed_to);
+  /* We update PeeringState::pg_committed_to via the callback
+   * invoked from ECBackend::handle_sub_write_reply immediately
+   * before updating rmw_pipeline.commited_to via
+   * rmw_pipeline.check_ops()->try_finish_rmw(), so these will
+   * *usually* match.  However, the PrimaryLogPG::submit_log_entries
+   * pathway can perform an out-of-band log update which updates
+   * PeeringState::pg_committed_to independently.  Thus, the value
+   * passed in is the right one to use. */
+  op->pg_committed_to = pg_committed_to;
   op->log_entries = log_entries;
   std::swap(op->updated_hit_set_history, hset_history);
   op->on_all_commit = on_all_commit;
@@ -1539,27 +1567,24 @@ int ECBackend::objects_read_sync(
 
 void ECBackend::objects_read_async(
   const hobject_t &hoid,
-  const list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
-             pair<bufferlist*, Context*> > > &to_read,
+  const list<pair<ECCommon::ec_align_t,
+                  pair<bufferlist*, Context*>>> &to_read,
   Context *on_complete,
   bool fast_read)
 {
-  map<hobject_t,std::list<boost::tuple<uint64_t, uint64_t, uint32_t> > >
-    reads;
+  map<hobject_t,std::list<ec_align_t>> reads;
 
   uint32_t flags = 0;
   extent_set es;
-  for (list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
-	 pair<bufferlist*, Context*> > >::const_iterator i =
-	 to_read.begin();
-       i != to_read.end();
-       ++i) {
-    pair<uint64_t, uint64_t> tmp =
-      sinfo.offset_len_to_stripe_bounds(
-	make_pair(i->first.get<0>(), i->first.get<1>()));
-
+  for (const auto& [read, ctx] : to_read) {
+    pair<uint64_t, uint64_t> tmp;
+    if (!cct->_conf->osd_ec_partial_reads || fast_read) {
+      tmp = sinfo.offset_len_to_stripe_bounds(make_pair(read.offset, read.size));
+    } else {
+      tmp = sinfo.offset_len_to_chunk_bounds(make_pair(read.offset, read.size));
+    }
     es.union_insert(tmp.first, tmp.second);
-    flags |= i->first.get<2>();
+    flags |= read.flags;
   }
 
   if (!es.empty()) {
@@ -1567,32 +1592,28 @@ void ECBackend::objects_read_async(
     for (auto j = es.begin();
 	 j != es.end();
 	 ++j) {
-      offsets.push_back(
-	boost::make_tuple(
-	  j.get_start(),
-	  j.get_len(),
-	  flags));
+      offsets.emplace_back(ec_align_t{j.get_start(), j.get_len(), flags});
     }
   }
 
   struct cb {
     ECBackend *ec;
     hobject_t hoid;
-    list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
+    list<pair<ECCommon::ec_align_t,
 	      pair<bufferlist*, Context*> > > to_read;
     unique_ptr<Context> on_complete;
     cb(const cb&) = delete;
     cb(cb &&) = default;
     cb(ECBackend *ec,
        const hobject_t &hoid,
-       const list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
+       const list<pair<ECCommon::ec_align_t,
                   pair<bufferlist*, Context*> > > &to_read,
        Context *on_complete)
       : ec(ec),
 	hoid(hoid),
 	to_read(to_read),
 	on_complete(on_complete) {}
-    void operator()(map<hobject_t,pair<int, extent_map> > &&results) {
+    void operator()(ECCommon::ec_extents_t &&results) {
       auto dpp = ec->get_parent()->get_dpp();
       ldpp_dout(dpp, 20) << "objects_read_async_cb: got: " << results
 			 << dendl;
@@ -1603,30 +1624,30 @@ void ECBackend::objects_read_async(
 
       int r = 0;
       for (auto &&read: to_read) {
-	if (got.first < 0) {
+	if (got.err < 0) {
 	  // error handling
 	  if (read.second.second) {
-	    read.second.second->complete(got.first);
+	    read.second.second->complete(got.err);
 	  }
 	  if (r == 0)
-	    r = got.first;
+	    r = got.err;
 	} else {
 	  ceph_assert(read.second.first);
-	  uint64_t offset = read.first.get<0>();
-	  uint64_t length = read.first.get<1>();
-	  auto range = got.second.get_containing_range(offset, length);
+	  uint64_t offset = read.first.offset;
+	  uint64_t length = read.first.size;
+	  auto range = got.emap.get_containing_range(offset, length);
+	  uint64_t range_offset = range.first.get_off();
+	  uint64_t range_length = range.first.get_len();
 	  ceph_assert(range.first != range.second);
-	  ceph_assert(range.first.get_off() <= offset);
-          ldpp_dout(dpp, 30) << "offset: " << offset << dendl;
-          ldpp_dout(dpp, 30) << "range offset: " << range.first.get_off() << dendl;
-          ldpp_dout(dpp, 30) << "length: " << length << dendl;
-          ldpp_dout(dpp, 30) << "range length: " << range.first.get_len()  << dendl;
-	  ceph_assert(
-	    (offset + length) <=
-	    (range.first.get_off() + range.first.get_len()));
+	  ceph_assert(range_offset <= offset);
+          ldpp_dout(dpp, 20) << "offset: " << offset << dendl;
+          ldpp_dout(dpp, 20) << "range offset: " << range_offset << dendl;
+          ldpp_dout(dpp, 20) << "length: " << length << dendl;
+          ldpp_dout(dpp, 20) << "range length: " << range_length << dendl;
+	  ceph_assert(offset + length <= range_offset + range_length);
 	  read.second.first->substr_of(
 	    range.first.get_val(),
-	    offset - range.first.get_off(),
+	    offset - range_offset,
 	    length);
 	  if (read.second.second) {
 	    read.second.second->complete(length);
@@ -1650,7 +1671,7 @@ void ECBackend::objects_read_async(
     reads,
     fast_read,
     make_gen_lambda_context<
-      map<hobject_t,pair<int, extent_map> > &&, cb>(
+      ECCommon::ec_extents_t &&, cb>(
 	cb(this,
 	   hoid,
 	   to_read,
@@ -1659,10 +1680,10 @@ void ECBackend::objects_read_async(
 
 void ECBackend::objects_read_and_reconstruct(
   const map<hobject_t,
-    std::list<boost::tuple<uint64_t, uint64_t, uint32_t> >
+    std::list<ECBackend::ec_align_t>
   > &reads,
   bool fast_read,
-  GenContextURef<map<hobject_t,pair<int, extent_map> > &&> &&func)
+  GenContextURef<ECCommon::ec_extents_t &&> &&func)
 {
   return read_pipeline.objects_read_and_reconstruct(
     reads, fast_read, std::move(func));

@@ -94,6 +94,8 @@ static const actpair actpairs[] =
  { "s3:GetPublicAccessBlock", s3GetPublicAccessBlock },
  { "s3:GetObjectAcl", s3GetObjectAcl },
  { "s3:GetObject", s3GetObject },
+ { "s3:GetObjectAttributes", s3GetObjectAttributes },
+ { "s3:GetObjectVersionAttributes", s3GetObjectVersionAttributes },
  { "s3:GetObjectTorrent", s3GetObjectTorrent },
  { "s3:GetObjectVersionAcl", s3GetObjectVersionAcl },
  { "s3:GetObjectVersion", s3GetObjectVersion },
@@ -113,6 +115,7 @@ static const actpair actpairs[] =
  { "s3:PutBucketCORS", s3PutBucketCORS },
  { "s3:PutBucketEncryption", s3PutBucketEncryption },
  { "s3:PutBucketLogging", s3PutBucketLogging },
+ { "s3:PostBucketLogging", s3PostBucketLogging },
  { "s3:PutBucketNotification", s3PutBucketNotification },
  { "s3:PutBucketOwnershipControls", s3PutBucketOwnershipControls },
  { "s3:PutBucketPolicy", s3PutBucketPolicy },
@@ -160,6 +163,9 @@ static const actpair actpairs[] =
  { "iam:DeleteOIDCProvider", iamDeleteOIDCProvider},
  { "iam:GetOIDCProvider", iamGetOIDCProvider},
  { "iam:ListOIDCProviders", iamListOIDCProviders},
+ { "iam:AddClientIdToOIDCProvider", iamAddClientIdToOIDCProvider},
+ { "iam:RemoveCientIdFromOIDCProvider", iamRemoveClientIdFromOIDCProvider},
+ { "iam:UpdateOIDCProviderThumbprint", iamUpdateOIDCProviderThumbprint},
  { "iam:TagRole", iamTagRole},
  { "iam:ListRoleTags", iamListRoleTags},
  { "iam:UntagRole", iamUntagRole},
@@ -594,6 +600,7 @@ bool ParseState::do_string(CephContext* cct, const char* s, size_t l) {
   bool is_action = false;
   bool is_valid_action = false;
   Statement* t = p.statements.empty() ? nullptr : &(p.statements.back());
+  ceph_assert(t || w->id == TokenID::Version || w->id == TokenID::Id);
 
   // Top level!
   if (w->id == TokenID::Version) {
@@ -701,11 +708,10 @@ bool ParseState::do_string(CephContext* cct, const char* s, size_t l) {
       return false;
     }
   } else if (w->kind == TokenKind::cond_key) {
-    auto& t = pp->policy.statements.back();
     if (l > 0 && *s == '$') {
       if (l >= 2 && *(s+1) == '{') {
         if (l > 0 && *(s+l-1) == '}') {
-          t.conditions.back().isruntime = true;
+          t->conditions.back().isruntime = true;
         } else {
 	  annotate(fmt::format("Invalid interpolation `{}`.",
 			       std::string_view{s, l}));
@@ -717,7 +723,7 @@ bool ParseState::do_string(CephContext* cct, const char* s, size_t l) {
         return false;
       }
     }
-    t.conditions.back().vals.emplace_back(s, l);
+    t->conditions.back().vals.emplace_back(s, l);
 
     // Principals
 
@@ -753,6 +759,13 @@ bool ParseState::do_string(CephContext* cct, const char* s, size_t l) {
   if (is_action && !is_valid_action) {
     annotate(fmt::format("`{}` is not a valid action.",
 			 std::string_view{s, l}));
+    return false;
+  }
+
+  // NotPrincipal must be used with "Effect":"Deny". Using it with "Effect":"Allow" is not supported.
+  // cf. https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_notprincipal.html
+  if (t && t->effect == Effect::Allow && !t->noprinc.empty()) {
+    annotate("Allow with NotPrincipal is not allowed.");
     return false;
   }
 
@@ -1325,6 +1338,7 @@ const char* action_bit_string(uint64_t action) {
 
   case s3ListBucketVersions:
     return "s3:ListBucketVersions";
+
   case s3ListAllMyBuckets:
     return "s3:ListAllMyBuckets";
 
@@ -1397,6 +1411,9 @@ const char* action_bit_string(uint64_t action) {
   case s3PutBucketLogging:
     return "s3:PutBucketLogging";
 
+    case s3PostBucketLogging:
+      return "s3:PostBucketLogging";
+
   case s3GetBucketTagging:
     return "s3:GetBucketTagging";
 
@@ -1465,6 +1482,12 @@ const char* action_bit_string(uint64_t action) {
 
   case s3BypassGovernanceRetention:
     return "s3:BypassGovernanceRetention";
+
+  case s3GetObjectAttributes:
+    return "s3:GetObjectAttributes";
+
+  case s3GetObjectVersionAttributes:
+    return "s3:GetObjectVersionAttributes";
 
   case s3DescribeJob:
     return "s3:DescribeJob";
@@ -1543,6 +1566,15 @@ const char* action_bit_string(uint64_t action) {
 
   case iamListOIDCProviders:
     return "iam:ListOIDCProviders";
+
+  case iamAddClientIdToOIDCProvider:
+    return "iam:AddClientIdToOIDCProvider";
+
+  case iamRemoveClientIdFromOIDCProvider:
+    return "iam:RemoveClientIdFromOIDCProvider";
+
+  case iamUpdateOIDCProviderThumbprint:
+    return "iam:UpdateOIDCProviderThumbprint";
 
   case iamTagRole:
     return "iam:TagRole";
@@ -1887,14 +1919,10 @@ struct IsPublicStatement
   bool operator() (const Statement &s) const {
     if (s.effect == Effect::Allow) {
       for (const auto& p : s.princ) {
-	if (p.is_wildcard()) {
-	  return s.eval_conditions(iam_all_env) == Effect::Allow;
-	}
+        if (p.is_wildcard()) {
+          return s.eval_conditions(iam_all_env) == Effect::Allow;
+        }
       }
-      // no princ should not contain fixed values
-      return std::none_of(s.noprinc.begin(), s.noprinc.end(), [](const rgw::auth::Principal& p) {
-								return p.is_wildcard();
-							      });
     }
     return false;
   }

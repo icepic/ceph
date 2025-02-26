@@ -54,7 +54,6 @@ public:
   bool acquire_locks(const MDRequestRef& mdr,
 		     MutationImpl::LockOpVec& lov,
 		     CInode *auth_pin_freeze=NULL,
-                     std::set<MDSCacheObject*> mustpin = {},
 		     bool auth_pin_nonblocking=false,
                      bool skip_quiesce=false);
 
@@ -152,7 +151,7 @@ public:
 
   void remove_client_cap(CInode *in, Capability *cap, bool kill=false);
 
-  std::set<client_t> get_late_revoking_clients(double timeout) const;
+  std::set<client_t> get_late_revoking_clients(double timeout);
 
   void snapflush_nudge(CInode *in);
   void mark_need_snapflush_inode(CInode *in);
@@ -250,9 +249,9 @@ protected:
   xlist<ScatterLock*> updated_scatterlocks;
 
   // Maintain a global list to quickly find if any caps are late revoking
-  xlist<Capability*> revoking_caps;
+  elist<Capability*> revoking_caps;
   // Maintain a per-client list to find clients responsible for late ones quickly
-  std::map<client_t, xlist<Capability*> > revoking_caps_by_client;
+  std::map<client_t, elist<Capability*> > revoking_caps_by_client;
 
   elist<CInode*> need_snapflush_inodes;
 
@@ -268,7 +267,6 @@ private:
 
   void handle_quiesce_failure(const MDRequestRef& mdr, std::string_view& marker);
 
-  bool any_late_revoking_caps(xlist<Capability*> const &revoking, double timeout) const;
   uint64_t calc_new_max_size(const CInode::inode_const_ptr& pi, uint64_t size);
   __u32 get_xattr_total_length(CInode::mempool_xattr_map &xattr);
   void decode_new_xattrs(CInode::mempool_inode *inode,

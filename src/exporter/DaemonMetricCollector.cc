@@ -29,27 +29,42 @@ using json_object = boost::json::object;
 using json_value = boost::json::value;
 using json_array = boost::json::array;
 
-void DaemonMetricCollector::request_loop(boost::asio::steady_timer &timer) {
-  timer.async_wait([&](const boost::system::error_code &e) {
-    std::cerr << e << std::endl;
+void DaemonMetricCollector::request_loop() {
+  timer.async_wait([this](const boost::system::error_code &e) {
+    if (shutdown_flag) {
+      dout(1) << "Metric collector request loop cancelled" << dendl;
+      return;
+    }
+
+    if (e) return; // Exit on error or cancellation
+
+    dout(10) << "Getting metrics loop..." << dendl;
     update_sockets();
+
+    bool sort_metrics = g_conf().get_val<bool>("exporter_sort_metrics");
+    auto prio_limit = g_conf().get_val<int64_t>("exporter_prio_limit");
     std::string dump_response;
     std::string schema_response;
-    dump_asok_metrics(false, -1, true, dump_response, schema_response, true);
+    dump_asok_metrics(sort_metrics, prio_limit, true, dump_response, schema_response, true);
     auto stats_period = g_conf().get_val<int64_t>("exporter_stats_period");
     // time to wait before sending requests again
-    timer.expires_from_now(std::chrono::seconds(stats_period));
-    request_loop(timer);
+    timer.expires_after(std::chrono::seconds(stats_period));
+    request_loop();
   });
 }
 
 void DaemonMetricCollector::main() {
-  // time to wait before sending requests again
-
-  boost::asio::io_context io;
-  boost::asio::steady_timer timer{io, std::chrono::seconds(0)};
-  request_loop(timer);
+  shutdown_flag = false;
+  timer.expires_after(std::chrono::seconds(0));
+  request_loop();
   io.run();
+}
+
+void DaemonMetricCollector::shutdown(){
+  shutdown_flag = true;
+  timer.cancel();  // Explicitly cancel the timer
+  dout(1) << "Collector shutdown initiated, timer canceled" << dendl;
+  io.stop();
 }
 
 std::string DaemonMetricCollector::get_metrics() {
@@ -153,24 +168,29 @@ void DaemonMetricCollector::dump_asok_metrics(bool sort_metrics, int64_t counter
   std::vector<std::pair<std::string, int>> daemon_pids;
 
   int failures = 0;
-  bool sort;
-  sort = sort_metrics ? true : g_conf().get_val<bool>("exporter_sort_metrics");
-  if (sort) {
+  if (sort_metrics) {
     builder =
         std::unique_ptr<OrderedMetricsBuilder>(new OrderedMetricsBuilder());
   } else {
     builder =
         std::unique_ptr<UnorderedMetricsBuilder>(new UnorderedMetricsBuilder());
   }
-  auto prio_limit = counter_prio >=0 ? counter_prio : g_conf().get_val<int64_t>("exporter_prio_limit");
+  auto prio_limit = counter_prio;
   for (auto &[daemon_name, sock_client] : clients) {
     if (sockClientsPing) {
       bool ok;
       sock_client.ping(&ok);
+      std::string ceph_daemon_socket_up_desc(
+      "Reports the health status of a Ceph daemon, as determined by whether it is able to respond via its admin socket (1 = healthy, 0 = unhealthy).");
+      labels_t ceph_daemon_socket_up_labels;
+      ceph_daemon_socket_up_labels["hostname"] = quote(ceph_get_hostname());
+      ceph_daemon_socket_up_labels["ceph_daemon"] = quote(daemon_name);
+      add_metric(builder, static_cast<int>(ok), "ceph_daemon_socket_up", ceph_daemon_socket_up_desc,
+             "gauge", ceph_daemon_socket_up_labels);
       if (!ok) {
         failures++;
         continue;
-      } 
+      }
     }
     std::string counter_dump_response = dump_response.size() > 0 ? dump_response :
       asok_request(sock_client, "counter dump", daemon_name);
@@ -186,6 +206,9 @@ void DaemonMetricCollector::dump_asok_metrics(bool sort_metrics, int64_t counter
     }
 
     try {
+      parse_asok_metrics(counter_dump_response, counter_schema_response,
+                         prio_limit, daemon_name);
+
       std::string config_show = !config_show_response ? "" :
         asok_request(sock_client, "config show", daemon_name);
       if (config_show.size() == 0) {
@@ -203,8 +226,6 @@ void DaemonMetricCollector::dump_asok_metrics(bool sort_metrics, int64_t counter
       if (!pid_str.empty()) {
         daemon_pids.push_back({daemon_name, std::stoi(pid_str)});
       }
-      parse_asok_metrics(counter_dump_response, counter_schema_response,
-                         prio_limit, daemon_name);
     } catch (const std::invalid_argument &e) {
       failures++;
       dout(1) << "failed to handle " << daemon_name << ": " << e.what()
@@ -490,3 +511,4 @@ DaemonMetricCollector &collector_instance() {
   static DaemonMetricCollector instance;
   return instance;
 }
+

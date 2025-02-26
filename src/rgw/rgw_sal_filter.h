@@ -108,9 +108,6 @@ public:
   virtual bool get_redirect_endpoint(std::string* endpoint) override {
       return next->get_redirect_endpoint(endpoint);
   }
-  virtual bool has_zonegroup_api(const std::string& api) const override {
-      return next->has_zonegroup_api(api);
-  }
   virtual const std::string& get_current_period_id() override {
       return next->get_current_period_id();
   }
@@ -292,6 +289,7 @@ public:
   }
   virtual int cluster_stat(RGWClusterStat& stats) override;
   virtual std::unique_ptr<Lifecycle> get_lifecycle(void) override;
+  virtual bool process_expired_objects(const DoutPrefixProvider *dpp, optional_yield y) override;
 
   virtual std::unique_ptr<Notification> get_notification(rgw::sal::Object* obj,
 				 rgw::sal::Object* src_obj, struct req_state* s,
@@ -669,6 +667,36 @@ public:
       optional_yield y, const DoutPrefixProvider *dpp) override {
     return next->remove_topics(objv_tracker, y, dpp);
   }
+  int get_logging_object_name(std::string& obj_name,
+      const std::string& prefix,
+      optional_yield y,
+      const DoutPrefixProvider *dpp,
+      RGWObjVersionTracker* objv_tracker) override {
+    return next->get_logging_object_name(obj_name, prefix, y, dpp, objv_tracker);
+  }
+  int set_logging_object_name(const std::string& obj_name,
+      const std::string& prefix,
+      optional_yield y,
+      const DoutPrefixProvider *dpp,
+      bool new_obj,
+      RGWObjVersionTracker* objv_track) override {
+    return next->set_logging_object_name(obj_name, prefix, y, dpp, new_obj, objv_track);
+  }
+  int remove_logging_object_name(const std::string& prefix,
+      optional_yield y,
+      const DoutPrefixProvider *dpp,
+      RGWObjVersionTracker* objv_tracker) override {
+    return next->remove_logging_object_name(prefix, y, dpp, objv_tracker);
+  }
+  int commit_logging_object(const std::string& obj_name, optional_yield y, const DoutPrefixProvider *dpp)override {
+    return next->commit_logging_object(obj_name, y, dpp);
+  }
+  int remove_logging_object(const std::string& obj_name, optional_yield y, const DoutPrefixProvider *dpp) override {
+    return next->remove_logging_object(obj_name, y, dpp);
+  }
+  int write_logging_object(const std::string& obj_name, const std::string& record, optional_yield y, const DoutPrefixProvider *dpp, bool async_completion) override {
+    return next->write_logging_object(obj_name, record, y, dpp, async_completion);
+  }
 
   virtual rgw_bucket& get_key() override { return next->get_key(); }
   virtual RGWBucketInfo& get_info() override { return next->get_info(); }
@@ -727,7 +755,9 @@ public:
 
   virtual int delete_object(const DoutPrefixProvider* dpp,
 			    optional_yield y,
-			    uint32_t flags) override;
+			    uint32_t flags,
+			    std::list<rgw_obj_index_key>* remove_objs,
+			    RGWObjVersionTracker* objv) override;
   virtual int copy_object(const ACLOwner& owner,
                const rgw_user& remote_user,
                req_info* info, const rgw_zone_id& source_zone,
@@ -752,15 +782,22 @@ public:
   virtual bool is_prefetch_data() override { return next->is_prefetch_data(); }
   virtual void set_compressed() override { return next->set_compressed(); }
   virtual bool is_compressed() override { return next->is_compressed(); }
+  virtual bool is_sync_completed(const DoutPrefixProvider* dpp,
+    const ceph::real_time& obj_mtime) override { return next->is_sync_completed(dpp, obj_mtime); }
   virtual void invalidate() override { return next->invalidate(); }
   virtual bool empty() const override { return next->empty(); }
   virtual const std::string &get_name() const override { return next->get_name(); }
 
-  virtual int get_obj_state(const DoutPrefixProvider* dpp, RGWObjState **state,
-			    optional_yield y, bool follow_olh = true) override;
-  virtual void set_obj_state(RGWObjState& _state) override { return next->set_obj_state(_state); }
+  /** If multipart, enumerate (a range [marker..marker+[min(max_parts, parts_count-1)] of) parts of the object */
+  virtual int list_parts(const DoutPrefixProvider* dpp, CephContext* cct,
+			 int max_parts, int marker, int* next_marker,
+			 bool* truncated, list_parts_each_t each_func,
+			 optional_yield y) override;
+
+  virtual int load_obj_state(const DoutPrefixProvider *dpp, optional_yield y,
+                             bool follow_olh = true) override;
   virtual int set_obj_attrs(const DoutPrefixProvider* dpp, Attrs* setattrs,
-			    Attrs* delattrs, optional_yield y) override;
+			    Attrs* delattrs, optional_yield y, uint32_t flags) override;
   virtual int get_obj_attrs(optional_yield y, const DoutPrefixProvider* dpp,
 			    rgw_obj* target_obj = NULL) override;
   virtual int modify_obj_attrs(const char* attr_name, bufferlist& attr_val,
@@ -786,6 +823,18 @@ public:
 				  bool update_object,
 				  const DoutPrefixProvider* dpp,
 				  optional_yield y) override;
+    virtual int restore_obj_from_cloud(Bucket* bucket,
+			   rgw::sal::PlacementTier* tier,
+			   rgw_placement_rule& placement_rule,
+			   rgw_bucket_dir_entry& o,
+			   CephContext* cct,
+		           RGWObjTier& tier_config,
+			   real_time& mtime,
+			   uint64_t olh_epoch,
+		           std::optional<uint64_t> days,
+			   const DoutPrefixProvider* dpp,
+			   optional_yield y,
+		           uint32_t flags) override;
   virtual bool placement_rules_match(rgw_placement_rule& r1, rgw_placement_rule& r2) override;
   virtual int dump_obj_layout(const DoutPrefixProvider *dpp, optional_yield y,
 			      Formatter* f) override;
@@ -794,8 +843,16 @@ public:
   virtual const Attrs& get_attrs(void) const override { return next->get_attrs(); };
   virtual int set_attrs(Attrs a) override { return next->set_attrs(a); };
   virtual bool has_attrs(void) override { return next->has_attrs(); };
+  virtual bool get_attr(const std::string& name, bufferlist &dest) override { return next->get_attr(name, dest); }
   virtual ceph::real_time get_mtime(void) const override { return next->get_mtime(); };
-  virtual uint64_t get_obj_size(void) const override { return next->get_obj_size(); };
+  virtual void set_mtime(ceph::real_time& mtime) override { return next->set_mtime(mtime); }
+  virtual uint64_t get_size(void) const override { return next->get_size(); };
+  virtual uint64_t get_accounted_size(void) const override { return next->get_accounted_size(); };
+  virtual void set_accounted_size(uint64_t size) override { return next->set_accounted_size(size); }
+  virtual uint64_t get_epoch(void) const override { return next->get_epoch(); }
+  virtual void set_epoch(uint64_t epoch) override { return next->set_epoch(epoch); }
+  virtual uint32_t get_short_zone_id(void) const override { return next->get_short_zone_id(); }
+  virtual void set_short_zone_id(uint32_t id) override { return next->set_short_zone_id(id); }
   virtual Bucket* get_bucket(void) const override { return bucket; };
   virtual void set_bucket(Bucket* b) override;
   virtual std::string get_hash_source(void) override { return next->get_hash_source(); };
@@ -803,6 +860,7 @@ public:
   virtual std::string get_oid(void) const override { return next->get_oid(); };
   virtual bool get_delete_marker(void) override { return next->get_delete_marker(); };
   virtual bool get_in_extra_data(void) override { return next->get_in_extra_data(); };
+  virtual bool exists(void) override { return next->exists(); };
   virtual void set_in_extra_data(bool i) override { return next->set_in_extra_data(i); };
   int range_to_ofs(uint64_t obj_size, int64_t &ofs, int64_t &end) {
     return next->range_to_ofs(obj_size, ofs, end);
@@ -832,6 +890,8 @@ public:
 
   virtual int get_torrent_info(const DoutPrefixProvider* dpp,
                                optional_yield y, bufferlist& bl) override;
+
+  virtual RGWObjVersionTracker& get_version_tracker() override { return next->get_version_tracker(); }
 
   virtual int omap_get_vals_by_keys(const DoutPrefixProvider *dpp,
 				    const std::string& oid,
@@ -868,6 +928,9 @@ public:
   virtual uint64_t get_size() override { return next->get_size(); }
   virtual const std::string& get_etag() override { return next->get_etag(); }
   virtual ceph::real_time& get_mtime() override { return next->get_mtime(); }
+  virtual const std::optional<rgw::cksum::Cksum>& get_cksum() {
+    return next->get_cksum();
+  }
 };
 
 class FilterMultipartUpload : public MultipartUpload {
@@ -907,7 +970,13 @@ public:
 		       RGWCompressionInfo& cs_info, off_t& ofs,
 		       std::string& tag, ACLOwner& owner,
 		       uint64_t olh_epoch,
-		       rgw::sal::Object* target_obj) override;
+		       rgw::sal::Object* target_obj,
+		       prefix_map_t& processed_prefixes) override;
+  virtual int cleanup_orphaned_parts(const DoutPrefixProvider *dpp,
+                                     CephContext *cct, optional_yield y,
+                                     const rgw_obj& obj,
+                                     std::list<rgw_obj_index_key>& remove_objs,
+                                     prefix_map_t& processed_prefixes) override;
 
   virtual int get_info(const DoutPrefixProvider *dpp, optional_yield y,
 		       rgw_placement_rule** rule,
@@ -956,52 +1025,28 @@ protected:
   std::unique_ptr<Lifecycle> next;
 
 public:
-  struct FilterLCHead : LCHead {
-    std::unique_ptr<LCHead> next;
-
-    FilterLCHead(std::unique_ptr<LCHead> _next) : next(std::move(_next)) {}
-    virtual ~FilterLCHead() = default;
-
-    virtual time_t& get_start_date() override { return next->get_start_date(); }
-    virtual void set_start_date(time_t t) override { next->set_start_date(t); }
-    virtual std::string& get_marker() override { return next->get_marker(); }
-    virtual void set_marker(const std::string& m) override { next->set_marker(m); }
-    virtual time_t& get_shard_rollover_date() override { return next->get_shard_rollover_date(); }
-    virtual void set_shard_rollover_date(time_t t) override { next->set_shard_rollover_date(t); }
-  };
-
-  struct FilterLCEntry : LCEntry {
-    std::unique_ptr<LCEntry> next;
-
-    FilterLCEntry(std::unique_ptr<LCEntry> _next) : next(std::move(_next)) {}
-    virtual ~FilterLCEntry() = default;
-
-    virtual std::string& get_bucket() override { return next->get_bucket(); }
-    virtual void set_bucket(const std::string& b) override { next->set_bucket(b); }
-    virtual std::string& get_oid() override { return next->get_oid(); }
-    virtual void set_oid(const std::string& o) override { next->set_oid(o); }
-    virtual uint64_t get_start_time() override { return next->get_start_time(); }
-    virtual void set_start_time(uint64_t t) override { next->set_start_time(t); }
-    virtual uint32_t get_status() override { return next->get_status(); }
-    virtual void set_status(uint32_t s) override { next->set_status(s); }
-    virtual void print(std::ostream& out) const override { return next->print(out); }
-  };
 
   FilterLifecycle(std::unique_ptr<Lifecycle> _next) : next(std::move(_next)) {}
   virtual ~FilterLifecycle() = default;
 
-  virtual std::unique_ptr<LCEntry> get_entry() override;
-  virtual int get_entry(const std::string& oid, const std::string& marker,
-			std::unique_ptr<LCEntry>* entry) override;
-  virtual int get_next_entry(const std::string& oid, const std::string& marker,
-			     std::unique_ptr<LCEntry>* entry) override;
-  virtual int set_entry(const std::string& oid, LCEntry& entry) override;
-  virtual int list_entries(const std::string& oid, const std::string& marker,
+  virtual int get_entry(const DoutPrefixProvider* dpp, optional_yield y,
+                        const std::string& oid, const std::string& marker,
+			LCEntry& entry) override;
+  virtual int get_next_entry(const DoutPrefixProvider* dpp, optional_yield y,
+                             const std::string& oid, const std::string& marker,
+			     LCEntry& entry) override;
+  virtual int set_entry(const DoutPrefixProvider* dpp, optional_yield y,
+                        const std::string& oid, const LCEntry& entry) override;
+  virtual int list_entries(const DoutPrefixProvider* dpp, optional_yield y,
+                           const std::string& oid, const std::string& marker,
 			   uint32_t max_entries,
-			   std::vector<std::unique_ptr<LCEntry>>& entries) override;
-  virtual int rm_entry(const std::string& oid, LCEntry& entry) override;
-  virtual int get_head(const std::string& oid, std::unique_ptr<LCHead>* head) override;
-  virtual int put_head(const std::string& oid, LCHead& head) override;
+			   std::vector<LCEntry>& entries) override;
+  virtual int rm_entry(const DoutPrefixProvider* dpp, optional_yield y,
+                       const std::string& oid, const LCEntry& entry) override;
+  virtual int get_head(const DoutPrefixProvider* dpp, optional_yield y,
+                       const std::string& oid, LCHead& head) override;
+  virtual int put_head(const DoutPrefixProvider* dpp, optional_yield y,
+                       const std::string& oid, const LCHead& head) override;
   virtual std::unique_ptr<LCSerializer> get_serializer(const std::string& lock_name,
 						       const std::string& oid,
 						       const std::string& cookie) override;
@@ -1038,6 +1083,7 @@ public:
   virtual int complete(size_t accounted_size, const std::string& etag,
                        ceph::real_time *mtime, ceph::real_time set_mtime,
                        std::map<std::string, bufferlist>& attrs,
+		       const std::optional<rgw::cksum::Cksum>& cksum,
                        ceph::real_time delete_at,
                        const char *if_match, const char *if_nomatch,
                        const std::string *user_data,

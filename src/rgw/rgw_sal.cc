@@ -67,41 +67,6 @@ extern rgw::sal::Driver* newD4NFilter(rgw::sal::Driver* next, boost::asio::io_co
 #endif
 }
 
-RGWObjState::RGWObjState() {
-}
-
-RGWObjState::~RGWObjState() {
-}
-
-RGWObjState::RGWObjState(const RGWObjState& rhs) : obj (rhs.obj) {
-  is_atomic = rhs.is_atomic;
-  has_attrs = rhs.has_attrs;
-  exists = rhs.exists;
-  size = rhs.size;
-  accounted_size = rhs.accounted_size;
-  mtime = rhs.mtime;
-  epoch = rhs.epoch;
-  if (rhs.obj_tag.length()) {
-    obj_tag = rhs.obj_tag;
-  }
-  if (rhs.tail_tag.length()) {
-    tail_tag = rhs.tail_tag;
-  }
-  write_tag = rhs.write_tag;
-  fake_tag = rhs.fake_tag;
-  shadow_obj = rhs.shadow_obj;
-  has_data = rhs.has_data;
-  if (rhs.data.length()) {
-    data = rhs.data;
-  }
-  prefetch_data = rhs.prefetch_data;
-  keep_tail = rhs.keep_tail;
-  is_olh = rhs.is_olh;
-  objv_tracker = rhs.objv_tracker;
-  pg_ver = rhs.pg_ver;
-  compressed = rhs.compressed;
-}
-
 rgw::sal::Driver* DriverManager::init_storage_provider(const DoutPrefixProvider* dpp,
 						     CephContext* cct,
 						     const Config& cfg,
@@ -450,4 +415,38 @@ int Object::range_to_ofs(uint64_t obj_size, int64_t &ofs, int64_t &end)
   }
   return 0;
 }
+
+
+std::string_view rgw_restore_status_dump(rgw::sal::RGWRestoreStatus status)
+{
+  switch (status)
+  {
+  case RGWRestoreStatus::None:
+    return "None";
+  case RGWRestoreStatus::RestoreAlreadyInProgress:
+    return "RestoreAlreadyInProgress";
+  case RGWRestoreStatus::CloudRestored:
+    return "CloudRestored";
+  case RGWRestoreStatus::RestoreFailed:
+    return "RestoreFailed";
+  default:
+    return "";
+  }
+}
+
+std::string_view rgw_restore_type_dump(rgw::sal::RGWRestoreType type)
+{
+  switch (type)
+  {
+  case RGWRestoreType::None:
+    return "None";
+  case RGWRestoreType::Temporary:
+    return "Temporary";
+  case RGWRestoreType::Permanent:
+    return "Permanent";
+  default:
+    return "";
+  }
+}
+
 } // namespace rgw::sal

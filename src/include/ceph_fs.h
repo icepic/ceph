@@ -440,6 +440,7 @@ enum {
 	CEPH_MDS_OP_QUIESCE_PATH = 0x01508,
 	CEPH_MDS_OP_QUIESCE_INODE = 0x01509,
 	CEPH_MDS_OP_LOCK_PATH = 0x0150a,
+	CEPH_MDS_OP_UNINLINE_DATA = 0x0150b
 };
 
 #define IS_CEPH_MDS_OP_NEWINODE(op) (op == CEPH_MDS_OP_CREATE     || \
@@ -488,6 +489,7 @@ int ceph_flags_sys2wire(int flags);
  */
 #define CEPH_XATTR_CREATE  (1 << 0)
 #define CEPH_XATTR_REPLACE (1 << 1)
+#define CEPH_XATTR_REMOVE2 (1 << 30)
 #define CEPH_XATTR_REMOVE  (1 << 31)
 
 /*
@@ -807,8 +809,10 @@ copy_to_legacy_head(struct ceph_mds_request_head_legacy *legacy,
 
 /* client reply */
 struct ceph_mds_reply_head {
+	using code_t = __le32;
 	__le32 op;
-	__le32 result;
+	// the result field is interpreted by MClientReply message as errorcode32_t
+	code_t result;
 	__le32 mdsmap_epoch;
 	__u8 safe;                     /* true if committed to disk */
 	__u8 is_dentry, is_target;     /* true if dentry, target inode records
@@ -1003,7 +1007,7 @@ extern const char *ceph_cap_op_name(int op);
 /* extra info for cap import/export */
 struct ceph_mds_cap_peer {
 	__le64 cap_id;
-	__le32 seq;
+	__le32 issue_seq;
 	__le32 mseq;
 	__le32 mds;
 	__u8   flags;
@@ -1056,7 +1060,7 @@ struct ceph_mds_cap_release {
 struct ceph_mds_cap_item {
 	__le64 ino;
 	__le64 cap_id;
-	__le32 migrate_seq, seq;
+	__le32 migrate_seq, issue_seq;
 } __attribute__ ((packed));
 
 #define CEPH_MDS_LEASE_REVOKE           1  /*    mds  -> client */

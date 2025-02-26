@@ -18,8 +18,10 @@
 #include <chrono>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 
 #include "common/DecayCounter.h"
+#include "common/MemoryModel.h"
 #include "include/common_fwd.h"
 #include "include/types.h"
 #include "include/filepath.h"
@@ -116,6 +118,10 @@ enum {
   l_mdss_ireq_fragmentdir,
   l_mdss_ireq_fragstats,
   l_mdss_ireq_inodestats,
+
+  l_mdc_uninline_started,
+  l_mdc_uninline_succeeded,
+  l_mdc_uninline_write_failed,
 
   l_mdc_last,
 };
@@ -593,7 +599,7 @@ private:
       MDSInternalContext(c->mds), cache(c), finisher(_finisher) {}
     ~C_MDS_QuiescePath() {
       if (finisher) {
-        finisher->complete(-CEPHFS_ECANCELED);
+        finisher->complete(-ECANCELED);
         finisher = nullptr;
       }
     }
@@ -627,8 +633,10 @@ private:
   void add_quiesce(CInode* parent, CInode* in);
 
   struct LockPathConfig {
+    using Lifetime = std::chrono::milliseconds;
     filepath fpath;
     std::vector<std::string> locks;
+    std::optional<Lifetime> lifetime;
     bool ap_dont_block = false;
     bool ap_freeze = false;
   };
@@ -1091,6 +1099,8 @@ private:
   void repair_dirfrag_stats(CDir *dir);
   void rdlock_dirfrags_stats(CInode *diri, MDSInternalContext *fin);
 
+  void uninline_data_work(MDRequestRef mdr);
+
   // my leader
   MDSRank *mds;
 
@@ -1284,7 +1294,7 @@ private:
   void repair_dirfrag_stats_work(const MDRequestRef& mdr);
   void rdlock_dirfrags_stats_work(const MDRequestRef& mdr);
 
-  ceph::unordered_map<inodeno_t,CInode*> inode_map;  // map of head inodes by ino
+  std::unordered_map<inodeno_t, CInode*> inode_map;  // map of head inodes by ino
   std::map<vinodeno_t, CInode*> snap_inode_map;  // map of snap inodes by ino
   CInode *root = nullptr; // root inode
   CInode *myin = nullptr; // .ceph/mds%d dir
@@ -1306,7 +1316,7 @@ private:
   std::map<CInode*,std::list<std::pair<CDir*,CDir*> > > projected_subtree_renames;  // renamed ino -> target dir
 
   // -- requests --
-  ceph::unordered_map<metareqid_t, MDRequestRef> active_requests;
+  std::unordered_map<metareqid_t, MDRequestRef> active_requests;
 
   // -- recovery --
   std::set<mds_rank_t> recovery_set;
@@ -1368,6 +1378,19 @@ private:
   StrayManager stray_manager;
 
  private:
+  enum dirfrag_killpoint : std::int8_t {
+    FRAGMENT_FREEZE = 1,
+    FRAGMENT_HANDLE_NOTIFY,
+    FRAGMENT_HANDLE_NOTIFY_POSTACK,
+    FRAGMENT_STORED_POST_NOTIFY,
+    FRAGMENT_STORED_POST_JOURNAL,
+    FRAGMENT_HANDLE_NOTIFY_ACK,
+    FRAGMENT_MAYBE_FINISH,
+    FRAGMENT_LOGGED,
+    FRAGMENT_COMMITTED,
+    FRAGMENT_OLD_PURGED,
+  };
+
   std::set<inodeno_t> replay_taken_inos; // the inos have been taken when replaying
 
   // -- fragmenting --
@@ -1426,6 +1449,8 @@ private:
   friend class C_MDC_FragmentCommit;
   friend class C_MDC_FragmentRollback;
   friend class C_IO_MDC_FragmentPurgeOld;
+  friend class C_IO_DataUninlined;
+  friend class C_MDC_DataUninlinedSubmitted;
 
   // -- subtrees --
   static const unsigned int SUBTREES_COUNT_THRESHOLD = 5;
@@ -1461,7 +1486,7 @@ private:
   void fragment_frozen(const MDRequestRef& mdr, int r);
   void fragment_unmark_unfreeze_dirs(const std::vector<CDir*>& dirs);
   void fragment_drop_locks(fragment_info_t &info);
-  void fragment_maybe_finish(const fragment_info_iterator& it);
+  fragment_info_iterator fragment_maybe_finish(const fragment_info_iterator it);
   void dispatch_fragment_dir(const MDRequestRef& mdr, bool abort_if_freezing=false);
   void _fragment_logged(const MDRequestRef& mdr);
   void _fragment_stored(const MDRequestRef& mdr);
@@ -1476,7 +1501,7 @@ private:
   void finish_uncommitted_fragment(dirfrag_t basedirfrag, int op);
   void rollback_uncommitted_fragment(dirfrag_t basedirfrag, frag_vec_t&& old_frags);
 
-  void quiesce_overdrive_fragmenting(CDir* dir, bool async);
+  void quiesce_overdrive_fragmenting_async(CDir* dir);
   void dispatch_quiesce_path(const MDRequestRef& mdr);
   void dispatch_quiesce_inode(const MDRequestRef& mdr);
 
@@ -1497,6 +1522,7 @@ private:
 
   // Stores the symlink target on the file object's head
   bool symlink_recovery;
+  enum dirfrag_killpoint kill_dirfrag_at;
 
   // File size recovery
   RecoveryQueue recovery_queue;
@@ -1523,6 +1549,8 @@ private:
   time upkeep_last_trim = clock::zero();
   time upkeep_last_release = clock::zero();
   std::atomic<bool> upkeep_trim_shutdown{false};
+  std::optional<MemoryModel> upkeep_memory_stats;
+  MemoryModel::mem_snap_t upkeep_mem_baseline;
 
   uint64_t kill_shutdown_at = 0;
 

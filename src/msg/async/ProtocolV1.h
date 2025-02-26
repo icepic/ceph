@@ -5,7 +5,9 @@
 #define _MSG_ASYNC_PROTOCOL_V1_
 
 #include "Protocol.h"
+#include "AsyncConnection.h"
 
+struct AuthSessionHandler;
 class ProtocolV1;
 using CtPtr = Ct<ProtocolV1>*;
 
@@ -112,7 +114,12 @@ protected:
     bool is_prepared {false};
   };
   // priority queue for outbound msgs
-  std::map<int, std::list<out_q_entry_t>> out_q;
+
+  /**
+   * A queue for each priority value, highest priority first.
+   */
+  std::map<int, std::list<out_q_entry_t>, std::greater<int>> out_q;
+
   bool keepalive;
   bool write_in_progress = false;
 

@@ -355,7 +355,7 @@ struct ObjectMetaTable : public EmptyMetaTable {
     } else if (strcasecmp(index, "Id") == 0) {
       pushstring(L, obj->get_oid());
     } else if (strcasecmp(index, "Size") == 0) {
-      lua_pushinteger(L, obj->get_obj_size());
+      lua_pushinteger(L, obj->get_size());
     } else if (strcasecmp(index, "MTime") == 0) {
       pushtime(L, obj->get_mtime());
     } else {
@@ -789,7 +789,8 @@ int execute(
     RGWOp* op,
     const std::string& script)
 {
-  lua_state_guard lguard(s->cct->_conf->rgw_lua_max_memory_per_state, s);
+  lua_state_guard lguard(s->cct->_conf->rgw_lua_max_memory_per_state,
+                         s->cct->_conf->rgw_lua_max_runtime_per_state, s);
   auto L = lguard.get();
   if (!L) {
     ldpp_dout(s, 1) << "Failed to create state for Lua request context" << dendl;

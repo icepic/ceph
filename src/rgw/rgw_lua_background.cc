@@ -83,9 +83,6 @@ void Background::start() {
   }
   started = true;
   runner = std::thread(&Background::run, this);
-  const auto rc = ceph_pthread_setname(runner.native_handle(),
-      "lua_background");
-  ceph_assert(rc == 0);
 }
 
 void Background::pause() {
@@ -125,8 +122,10 @@ const BackgroundMapValue& Background::get_table_value(const std::string& key) co
 //(2) Executes the script
 //(3) Sleep (configurable)
 void Background::run() {
+  ceph_pthread_setname("lua_background");
   const DoutPrefixProvider* const dpp = &dp;
-  lua_state_guard lguard(cct->_conf->rgw_lua_max_memory_per_state, dpp);
+  lua_state_guard lguard(cct->_conf->rgw_lua_max_memory_per_state,
+                         cct->_conf->rgw_lua_max_runtime_per_state, dpp);
   auto L = lguard.get();
   if (!L) {
     ldpp_dout(dpp, 1) << "Failed to create state for Lua background thread" << dendl;

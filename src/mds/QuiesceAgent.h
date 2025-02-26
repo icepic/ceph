@@ -30,7 +30,7 @@ class QuiesceAgent {
         : quiesce_control(quiesce_control)
         , stop_agent_thread(false)
         , agent_thread(this) {
-      agent_thread.create("quiesce.agt");
+      agent_thread.create("mds-q-agt");
     };
 
     virtual ~QuiesceAgent() {
@@ -237,7 +237,7 @@ class QuiesceAgent {
       return std::max(current.db_version, pending.db_version);
     }
 
-    void set_pending_roots(QuiesceDbVersion db_version, TrackedRoots&& new_roots);
+    virtual void set_pending_roots(QuiesceDbVersion db_version, TrackedRoots&& new_roots);
 
     void set_upkeep_needed();
 

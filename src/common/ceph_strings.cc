@@ -153,7 +153,15 @@ uint64_t ceph_release_features(int r)
 		return req;
 
 	req |= CEPH_FEATUREMASK_CRUSH_CHOOSE_ARGS; // and overlaps
-	if (r <= CEPH_RELEASE_LUMINOUS)
+	if (r <= CEPH_RELEASE_QUINCY)
+		return req;
+
+	req |= CEPH_FEATUREMASK_SERVER_REEF; // upmap-primary
+	if (r <= CEPH_RELEASE_REEF)
+		return req;
+
+	req |= CEPH_FEATUREMASK_CRUSH_MSR;
+	if (r <= CEPH_RELEASE_SQUID)
 		return req;
 
 	return req;
@@ -313,6 +321,8 @@ const char *ceph_mds_op_name(int op)
 	case CEPH_MDS_OP_REPAIR_INODESTATS: return "repair_inodestats";
 	case CEPH_MDS_OP_QUIESCE_PATH: return "quiesce_path";
 	case CEPH_MDS_OP_QUIESCE_INODE: return "quiesce_inode";
+	case CEPH_MDS_OP_LOCK_PATH: return "lock_path";
+	case CEPH_MDS_OP_UNINLINE_DATA: return "uninline_data";
 	}
 	return "???";
 }

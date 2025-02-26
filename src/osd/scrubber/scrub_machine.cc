@@ -106,6 +106,25 @@ ceph::timespan ScrubMachine::get_time_scrubbing() const
   return ceph::timespan{};
 }
 
+std::optional<pg_scrubbing_status_t> ScrubMachine::get_reservation_status()
+    const
+{
+  const auto resv_state = state_cast<const ReservingReplicas*>();
+  if (!resv_state) {
+    return std::nullopt;
+  }
+  const auto session = state_cast<const Session*>();
+  dout(30) << fmt::format(
+		  "{}: we are reserving {:p}-{:p}", __func__, (void*)session,
+		  (void*)resv_state)
+	   << dendl;
+  if (!session || !session->m_reservations) {
+    dout(20) << fmt::format("{}: no reservations data", __func__) << dendl;
+    return std::nullopt;
+  }
+  return session->get_reservation_status();
+}
+
 // ////////////// the actual actions
 
 // ----------------------- NotActive -----------------------------------------
@@ -159,14 +178,6 @@ sc::result PrimaryIdle::react(const StartScrub&)
   return transit<ReservingReplicas>();
 }
 
-sc::result PrimaryIdle::react(const AfterRepairScrub&)
-{
-  dout(10) << "PrimaryIdle::react(const AfterRepairScrub&)" << dendl;
-  DECLARE_LOCALS;
-  scrbr->reset_epoch();
-  return transit<ReservingReplicas>();
-}
-
 void PrimaryIdle::clear_state(const FullReset&) {
   dout(10) << "PrimaryIdle::react(const FullReset&): clearing state flags"
            << dendl;
@@ -182,15 +193,6 @@ Session::Session(my_context ctx)
 {
   dout(10) << "-- state -->> PrimaryActive/Session" << dendl;
   DECLARE_LOCALS;  // 'scrbr' & 'pg_id' aliases
-
-  // while we've checked the 'someone is reserving' flag before queueing
-  // the start-scrub event, it's possible that the flag was set in the meantime.
-  // Handling this case here requires adding a new sub-state, and the
-  // complication of reporting a failure to the caller in a new failure
-  // path. On the other hand - ignoring an ongoing reservation on rare
-  // occasions will cause no harm.
-  // We choose ignorance.
-  std::ignore = scrbr->set_reserving_now();
 
   m_perf_set = &scrbr->get_counters_set();
   m_perf_set->inc(scrbcnt_started);
@@ -216,7 +218,25 @@ sc::result Session::react(const IntervalChanged&)
 
   ceph_assert(m_reservations);
   m_reservations->discard_remote_reservations();
+  m_abort_reason = delay_cause_t::interval;
   return transit<NotActive>();
+}
+
+std::optional<pg_scrubbing_status_t> Session::get_reservation_status() const
+{
+  if (!m_reservations) {
+    return std::nullopt;
+  }
+  DECLARE_LOCALS;  // 'scrbr' & 'pg_id' aliases
+  const auto req = m_reservations->get_last_sent();
+  pg_scrubbing_status_t s;
+  s.m_osd_to_respond = req ? req->osd : 0;
+  s.m_ordinal_of_requested_replica = m_reservations->active_requests_cnt();
+  s.m_num_to_reserve = scrbr->get_pg()->get_actingset().size() - 1;
+  s.m_duration_seconds =
+      duration_cast<seconds>(context<ScrubMachine>().get_time_scrubbing())
+	  .count();
+  return s;
 }
 
 
@@ -235,31 +255,12 @@ ReservingReplicas::ReservingReplicas(my_context ctx)
       *scrbr, context<PrimaryActive>().last_request_sent_nonce,
       *session.m_perf_set);
 
-  if (session.m_reservations->get_last_sent()) {
-    // the 1'st reservation request was sent
-
-    auto timeout = scrbr->get_pg_cct()->_conf.get_val<milliseconds>(
-	"osd_scrub_reservation_timeout");
-    if (timeout.count() > 0) {
-      // Start a timer to handle case where the replicas take a long time to
-      // ack the reservation.  See ReservationTimeout handler below.
-      m_timeout_token =
-	  machine.schedule_timer_event_after<ReservationTimeout>(timeout);
-    }
-  } else {
+  if (!session.m_reservations->get_last_sent()) {
     // no replicas to reserve
     dout(10) << "no replicas to reserve" << dendl;
     // can't transit directly from here
     post_event(RemotesReserved{});
   }
-}
-
-ReservingReplicas::~ReservingReplicas()
-{
-  DECLARE_LOCALS;  // 'scrbr' & 'pg_id' aliases
-  // it's OK to try and clear the flag even if we don't hold it
-  // (the flag remembers the actual holder)
-  scrbr->clear_reserving_now();
 }
 
 sc::result ReservingReplicas::react(const ReplicaGrant& ev)
@@ -305,26 +306,6 @@ sc::result ReservingReplicas::react(const ReplicaReject& ev)
   return transit<PrimaryIdle>();
 }
 
-sc::result ReservingReplicas::react(const ReservationTimeout&)
-{
-  DECLARE_LOCALS;  // 'scrbr' & 'pg_id' aliases
-  auto& session = context<Session>();
-  dout(10) << "ReservingReplicas::react(const ReservationTimeout&)" << dendl;
-  ceph_assert(session.m_reservations);
-
-  session.m_reservations->log_failure_and_duration(scrbcnt_resrv_timed_out);
-
-  const auto msg = fmt::format(
-      "osd.{} PgScrubber: {} timeout on reserving replicas (since {})",
-      scrbr->get_whoami(), scrbr->get_spgid(), entered_at);
-  dout(1) << msg << dendl;
-  scrbr->get_clog()->warn() << msg;
-
-  // cause the scrubber to stop the scrub session, marking 'reservation
-  // failure' as the cause (affecting future scheduling)
-  scrbr->flag_reservations_failure();
-  return transit<PrimaryIdle>();
-}
 
 // ----------------------- ActiveScrubbing -----------------------------------
 
@@ -356,7 +337,8 @@ ActiveScrubbing::~ActiveScrubbing()
   // completed successfully), we use it now to set the 'failed scrub' duration.
   if (session.m_session_started_at != ScrubTimePoint{}) {
     // delay the next invocation of the scrubber on this target
-    scrbr->penalize_next_scrub(Scrub::delay_cause_t::aborted);
+    scrbr->on_mid_scrub_abort(
+	session.m_abort_reason.value_or(Scrub::delay_cause_t::aborted));
 
     auto logged_duration = ScrubClock::now() - session.m_session_started_at;
     session.m_perf_set->tinc(scrbcnt_failed_elapsed, logged_duration);

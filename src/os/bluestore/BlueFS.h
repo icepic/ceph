@@ -231,6 +231,7 @@ public:
     WRITER_WAL,
     WRITER_SST,
   };
+  void collect_alerts(osd_alert_list_t& alerts);
 
   struct File : public RefCountedObject {
     MEMPOOL_CLASS_HELPERS();
@@ -433,7 +434,6 @@ public:
     FileRef file;
     explicit FileLock(FileRef f) : file(std::move(f)) {}
   };
-
 private:
   PerfCounters *logger = nullptr;
 
@@ -602,9 +602,6 @@ private:
   void _flush_bdev();  // this is safe to call without a lock
   void _flush_bdev(std::array<bool, MAX_BDEV>& dirty_bdevs);  // this is safe to call without a lock
 
-  int _preallocate(FileRef f, uint64_t off, uint64_t len);
-  int _truncate(FileWriter *h, uint64_t off);
-
   int64_t _read(
     FileReader *h,   ///< [in] read from here
     uint64_t offset, ///< [in] offset
@@ -740,9 +737,10 @@ public:
   }
 
   int add_block_device(unsigned bdev, const std::string& path, bool trim,
-		       bluefs_shared_alloc_context_t* _shared_alloc = nullptr);
+                       bluefs_shared_alloc_context_t* _shared_alloc = nullptr);
   bool bdev_support_label(unsigned id);
   uint64_t get_block_device_size(unsigned bdev) const;
+  BlockDevice* get_block_device(unsigned bdev) const;
 
   // handler for discard event
   void handle_discard(unsigned dev, interval_set<uint64_t>& to_release);
@@ -778,6 +776,7 @@ public:
   }
   uint64_t debug_get_dirty_seq(FileWriter *h);
   bool debug_get_is_dev_dirty(FileWriter *h, uint8_t dev);
+  void trim_free_space(const std::string& type, std::ostream& outss);
 
 private:
   // Wrappers for BlockDevice::read(...) and BlockDevice::read_random(...)

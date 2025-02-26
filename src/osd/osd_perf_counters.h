@@ -43,6 +43,11 @@ enum {
   l_osd_op_before_queue_op_lat,
   l_osd_op_before_dequeue_op_lat,
 
+  l_osd_replica_read,
+  l_osd_replica_read_redirect_missing,
+  l_osd_replica_read_redirect_conflict,
+  l_osd_replica_read_served,
+
   l_osd_sop,
   l_osd_sop_inb,
   l_osd_sop_lat,
@@ -136,6 +141,8 @@ enum {
   // are labeled, and histograms do not fully support labels.
   l_osd_scrub_reservation_dur_hist,
 
+  l_osd_watch_timeouts,
+
   l_osd_last,
 };
 
@@ -218,8 +225,6 @@ enum {
   scrbcnt_resrv_successful_elapsed,
   /// # failed attempt to reserve replicas due to an abort
   scrbcnt_resrv_aborted,
-  /// # reservation process timed out
-  scrbcnt_resrv_timed_out,
   /// # reservation failed due to a 'rejected' response
   scrbcnt_resrv_rejected,
   /// # reservation skipped for high-priority scrubs

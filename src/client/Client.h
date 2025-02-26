@@ -16,6 +16,7 @@
 #ifndef CEPH_CLIENT_H
 #define CEPH_CLIENT_H
 
+#include "common/admin_socket.h"
 #include "common/CommandTable.h"
 #include "common/Finisher.h"
 #include "common/Timer.h"
@@ -28,8 +29,6 @@
 #include "include/interval_set.h"
 #include "include/lru.h"
 #include "include/types.h"
-#include "include/unordered_map.h"
-#include "include/unordered_set.h"
 #include "include/cephfs/metrics/Types.h"
 #include "mds/mdstypes.h"
 #include "mds/MDSAuthCaps.h"
@@ -50,10 +49,14 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 
 using std::set;
 using std::map;
 using std::fstream;
+
+namespace boost::asio { class io_context; }
 
 class FSMap;
 class FSMapUser;
@@ -219,6 +222,7 @@ struct dir_result_t {
     ordered_count = 0;
     cache_index = 0;
     buffer.clear();
+    fd = -1;
   }
 
   InodeRef inode;
@@ -379,7 +383,7 @@ public:
 
   /**
    * Returns the length of the buffer that got filled in, or -errno.
-   * If it returns -CEPHFS_ERANGE you just need to increase the size of the
+   * If it returns -ERANGE you just need to increase the size of the
    * buffer and try again.
    */
   int _getdents(dir_result_t *dirp, char *buf, int buflen, bool ful);  // get a bunch of dentries at once
@@ -790,7 +794,7 @@ public:
   void submit_sync_caps(Inode *in, ceph_tid_t want, Context *onfinish);
   void wait_sync_caps(Inode *in, ceph_tid_t want);
   void wait_sync_caps(ceph_tid_t want);
-  void queue_cap_snap(Inode *in, SnapContext &old_snapc);
+  void queue_cap_snap(Inode *in, const SnapContext &old_snapc);
   void finish_cap_snap(Inode *in, CapSnap &capsnap, int used);
 
   void _schedule_invalidate_dentry_callback(Dentry *dn, bool del);
@@ -1057,11 +1061,10 @@ protected:
   // helpers
   void wake_up_session_caps(MetaSession *s, bool reconnect);
 
-  void add_nonblocking_onfinish_to_context_list(std::list<Context*>& ls, Context *onfinish) {
-    ls.push_back(onfinish);
+  void wait_on_context_list(std::vector<Context*>& ls);
+  void signal_context_list(std::vector<Context*>& ls) {
+    finish_contexts(cct, ls, 0);
   }
-  void wait_on_context_list(std::list<Context*>& ls);
-  void signal_context_list(std::list<Context*>& ls);
   void signal_caps_inode(Inode *in);
 
   // -- metadata cache stuff
@@ -1406,6 +1409,21 @@ private:
     Inode *in;
     uint64_t off;
     uint64_t len;
+
+    void finish(int r) override;
+  };
+
+  // A wrapper callback which takes the 'client_lock' and finishes the context.
+  // One of the usecase is the filer->write_trunc which doesn't hold client_lock
+  // in the call back passed. So, use this wrapper in such cases.
+  class C_Lock_Client_Finisher : public Context {
+  public:
+    C_Lock_Client_Finisher(Client *clnt, Context *onfinish)
+      : clnt(clnt), onfinish(onfinish) {}
+
+  private:
+    Client *clnt;
+    Context *onfinish;
 
     void finish(int r) override;
   };
@@ -1861,21 +1879,21 @@ private:
 
   // file handles, etc.
   interval_set<int> free_fd_set;  // unused fds
-  ceph::unordered_map<int, Fh*> fd_map;
+  std::unordered_map<int, Fh*> fd_map;
   set<Fh*> ll_unclosed_fh_set;
-  ceph::unordered_set<dir_result_t*> opened_dirs;
+  std::unordered_set<dir_result_t*> opened_dirs;
   uint64_t fd_gen = 1;
 
   bool   mount_aborted = false;
   bool   blocklisted = false;
 
-  ceph::unordered_map<vinodeno_t, Inode*> inode_map;
-  ceph::unordered_map<ino_t, vinodeno_t> faked_ino_map;
+  std::unordered_map<vinodeno_t, Inode*> inode_map;
+  std::unordered_map<ino_t, vinodeno_t> faked_ino_map;
   interval_set<ino_t> free_faked_inos;
   ino_t last_used_faked_ino;
   ino_t last_used_faked_root;
 
-  int local_osd = -CEPHFS_ENXIO;
+  int local_osd = -ENXIO;
   epoch_t local_osd_epoch = 0;
 
   // mds requests
@@ -1888,7 +1906,7 @@ private:
 
   xlist<Inode*> delayed_list;
   int num_flushing_caps = 0;
-  ceph::unordered_map<inodeno_t,SnapRealm*> snap_realms;
+  std::unordered_map<inodeno_t, SnapRealm*> snap_realms;
   std::map<std::string, std::string> metadata;
 
   ceph::coarse_mono_time last_auto_reconnect;

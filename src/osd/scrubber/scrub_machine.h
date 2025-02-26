@@ -2,6 +2,7 @@
 // vim: ts=8 sw=2 smarttab
 #pragma once
 
+#include <optional>
 #include <string>
 
 #include <boost/statechart/custom_reaction.hpp>
@@ -160,14 +161,13 @@ VALUE_EVENT(ReserverGranted, AsyncScrubResData);
 /// all replicas have granted our reserve request
 MEV(RemotesReserved)
 
-/// reservations have timed out
-MEV(ReservationTimeout)
+/// abort the scrub session, if in ReservingReplicas state
+/// (used when the operator issues a scrub request, and we no longer
+/// need the reservations)
+MEV(AbortIfReserving)
 
 /// initiate a new scrubbing session (relevant if we are a Primary)
 MEV(StartScrub)
-
-/// initiate a new scrubbing session. Only triggered at Recovery completion
-MEV(AfterRepairScrub)
 
 /// triggered when the PG unblocked an object that was marked for scrubbing.
 /// Via the PGScrubUnblocked op
@@ -295,8 +295,11 @@ class ScrubMachine : public sc::state_machine<ScrubMachine, NotActive> {
   [[nodiscard]] bool is_accepting_updates() const;
   [[nodiscard]] bool is_primary_idle() const;
 
-  // elapsed time for the currently active scrub.session
+  /// elapsed time for the currently active scrub.session
   ceph::timespan get_time_scrubbing() const;
+
+  /// replica reservation process status
+  std::optional<pg_scrubbing_status_t> get_reservation_status() const;
 
 // ///////////////// aux declarations & functions //////////////////////// //
 
@@ -475,11 +478,8 @@ struct PrimaryIdle;
  *  The basic state for an active Primary. Ready to accept a new scrub request.
  *  State managed here: being in the OSD's scrub queue (unless when scrubbing).
  *
- *  Scrubbing is triggered by one of the following events:
- *  - (standard scenario for a Primary): 'StartScrub'. Initiates the OSDs
- *    resources reservation process. Will be issued by PG::scrub(), following a
- *    queued "PGScrub" op.
- *  - a special end-of-recovery Primary scrub event ('AfterRepairScrub').
+ *  Scrubbing is triggered by a 'StartScrub' event, which is issued by
+ *  PG::scrub(), following a queued "PGScrub" op.
  */
 struct PrimaryActive : sc::state<PrimaryActive, ScrubMachine, PrimaryIdle>,
 			 NamedSimply {
@@ -520,13 +520,10 @@ struct PrimaryIdle : sc::state<PrimaryIdle, PrimaryActive>, NamedSimply {
 
   using reactions = mpl::list<
       sc::custom_reaction<StartScrub>,
-      // a scrubbing that was initiated at recovery completion:
-      sc::custom_reaction<AfterRepairScrub>,
       // undoing set_op_params(), if aborted before starting the scrub:
       sc::in_state_reaction<FullReset, PrimaryIdle, &PrimaryIdle::clear_state>>;
 
   sc::result react(const StartScrub&);
-  sc::result react(const AfterRepairScrub&);
 };
 
 /**
@@ -563,27 +560,31 @@ struct Session : sc::state<Session, PrimaryActive, ReservingReplicas>,
 
   /// the time when the session was initiated
   ScrubTimePoint m_session_started_at{ScrubClock::now()};
+
+  /// abort reason - if known. Determines the delay time imposed on the
+  /// failed scrub target.
+  std::optional<Scrub::delay_cause_t> m_abort_reason{std::nullopt};
+
+  /// when reserving replicas: fetch the reservation status
+  std::optional<pg_scrubbing_status_t> get_reservation_status() const;
 };
 
-struct ReservingReplicas : sc::state<ReservingReplicas, Session>,
-			   NamedSimply {
+struct ReservingReplicas : sc::state<ReservingReplicas, Session>, NamedSimply {
   explicit ReservingReplicas(my_context ctx);
-  ~ReservingReplicas();
-  using reactions = mpl::list<sc::custom_reaction<ReplicaGrant>,
-			      sc::custom_reaction<ReplicaReject>,
-			      sc::transition<RemotesReserved, ActiveScrubbing>,
-			      sc::custom_reaction<ReservationTimeout>>;
+  ~ReservingReplicas() = default;
+  using reactions = mpl::list<
+      sc::custom_reaction<ReplicaGrant>,
+      sc::custom_reaction<ReplicaReject>,
+      sc::transition<AbortIfReserving, PrimaryIdle>,
+      sc::transition<RemotesReserved, ActiveScrubbing>>;
 
   ScrubTimePoint entered_at = ScrubClock::now();
-  ScrubMachine::timer_event_token_t m_timeout_token;
 
   /// a "raw" event carrying a peer's grant response
   sc::result react(const ReplicaGrant&);
 
   /// a "raw" event carrying a peer's denial response
   sc::result react(const ReplicaReject&);
-
-  sc::result react(const ReservationTimeout&);
 };
 
 

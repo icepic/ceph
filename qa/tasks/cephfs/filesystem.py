@@ -61,6 +61,14 @@ class ObjectNotFound(Exception):
     def __str__(self):
         return "Object not found: '{0}'".format(self._object_name)
 
+class FSDamaged(Exception):
+    def __init__(self, ident, ranks):
+        self.ident = ident
+        self.ranks = ranks
+
+    def __str__(self):
+        return f"File system {self.ident} has damaged ranks {self.ranks}"
+
 class FSMissing(Exception):
     def __init__(self, ident):
         self.ident = ident
@@ -640,12 +648,17 @@ class FilesystemBase(MDSClusterBase):
     def set_joinable(self, joinable=True):
         self.set_var("joinable", joinable)
 
-    def set_max_mds(self, max_mds):
-        self.set_var("max_mds", "%d" % max_mds)
+    def set_max_mds(self, max_mds, confirm=True):
+        if confirm:
+            self.set_var('max_mds', f'{max_mds}', '--yes-i-really-mean-it')
+        else:
+            self.set_var("max_mds", f"{max_mds}",)
 
     def set_session_timeout(self, timeout):
         self.set_var("session_timeout", "%d" % timeout)
 
+    def set_session_autoclose(self, autoclose_time):
+        self.set_var("session_autoclose", "%d" % autoclose_time)
     def set_allow_standby_replay(self, yes):
         self.set_var("allow_standby_replay", yes)
 
@@ -1087,9 +1100,16 @@ class FilesystemBase(MDSClusterBase):
             mds.check_status()
 
         active_count = 0
-        mds_map = self.get_mds_map(status=status)
 
+        if status is None:
+            status = self.status()
+
+        mds_map = self.get_mds_map(status=status)
         log.debug("are_daemons_healthy: mds map: {0}".format(mds_map))
+
+        damaged = self.get_damaged(status=status)
+        if damaged:
+            raise FSDamaged(self.id, damaged)
 
         for mds_id, mds_status in mds_map['info'].items():
             if mds_status['state'] not in ["up:active", "up:standby", "up:standby-replay"]:

@@ -12,12 +12,11 @@
  * 
  */
 
-#ifndef _BACKWARD_BACKWARD_WARNING_H
-#define _BACKWARD_BACKWARD_WARNING_H   // make gcc 4.3 shut up about hash_*
-#endif
+#include "Dumper.h"
 
 #include "include/compat.h"
 #include "include/fs_types.h"
+#include "common/debug.h"
 #include "common/entity_name.h"
 #include "common/errno.h"
 #include "common/safe_io.h"
@@ -26,8 +25,6 @@
 #include "mds/JournalPointer.h"
 #include "osdc/Journaler.h"
 #include "mon/MonClient.h"
-
-#include "Dumper.h"
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_mds
@@ -112,6 +109,7 @@ int Dumper::dump(const char *dump_file)
     fsid.print(fsid_str);
     char buf[HEADER_LEN];
     memset(buf, 0, sizeof(buf));
+    auto&& last_committed = journaler.get_last_committed();
     snprintf(buf, HEADER_LEN, "Ceph mds%d journal dump\n start offset %llu (0x%llx)\n\
        length %llu (0x%llx)\n    write_pos %llu (0x%llx)\n    format %llu\n\
        trimmed_pos %llu (0x%llx)\n    stripe_unit %lu (0x%lx)\n    stripe_count %lu (0x%lx)\n\
@@ -119,12 +117,12 @@ int Dumper::dump(const char *dump_file)
 	    role.rank, 
 	    (unsigned long long)start, (unsigned long long)start,
 	    (unsigned long long)len, (unsigned long long)len,
-	    (unsigned long long)journaler.last_committed.write_pos, (unsigned long long)journaler.last_committed.write_pos,
-	    (unsigned long long)journaler.last_committed.stream_format,
-	    (unsigned long long)journaler.last_committed.trimmed_pos, (unsigned long long)journaler.last_committed.trimmed_pos,
-            (unsigned long)journaler.last_committed.layout.stripe_unit, (unsigned long)journaler.last_committed.layout.stripe_unit,
-            (unsigned long)journaler.last_committed.layout.stripe_count, (unsigned long)journaler.last_committed.layout.stripe_count,
-            (unsigned long)journaler.last_committed.layout.object_size, (unsigned long)journaler.last_committed.layout.object_size,
+	    (unsigned long long)last_committed.write_pos, (unsigned long long)last_committed.write_pos,
+	    (unsigned long long)last_committed.stream_format,
+	    (unsigned long long)last_committed.trimmed_pos, (unsigned long long)last_committed.trimmed_pos,
+            (unsigned long)last_committed.layout.stripe_unit, (unsigned long)last_committed.layout.stripe_unit,
+            (unsigned long)last_committed.layout.stripe_count, (unsigned long)last_committed.layout.stripe_count,
+            (unsigned long)last_committed.layout.object_size, (unsigned long)last_committed.layout.object_size,
 	    fsid_str,
 	    4);
     r = safe_write(fd, buf, sizeof(buf));
@@ -156,8 +154,8 @@ int Dumper::dump(const char *dump_file)
 
       C_SaferCond cond;
       lock.lock();
-      filer.read(ino, &journaler.get_layout(), CEPH_NOSNAP,
-                 pos, read_size, &bl, 0, &cond);
+      auto&& layout = journaler.get_layout();
+      filer.read(ino, &layout, CEPH_NOSNAP, pos, read_size, &bl, 0, &cond);
       lock.unlock();
       r = cond.wait();
       if (r < 0) {
@@ -264,9 +262,10 @@ int Dumper::undump(const char *dump_file, bool force)
   }
 
   if (recovered == 0) {
-    stripe_unit = journaler.last_committed.layout.stripe_unit;
-    stripe_count = journaler.last_committed.layout.stripe_count;
-    object_size = journaler.last_committed.layout.object_size;
+    auto&& last_committed = journaler.get_last_committed();
+    stripe_unit = last_committed.layout.stripe_unit;
+    stripe_count = last_committed.layout.stripe_count;
+    object_size = last_committed.layout.object_size;
   } else {
     // try to get layout from dump file header, if failed set layout to default
     if (strstr(buf, "stripe_unit")) {

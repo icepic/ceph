@@ -50,6 +50,12 @@ import { CephfsVolumeFormComponent } from './ceph/cephfs/cephfs-form/cephfs-form
 import { UpgradeProgressComponent } from './ceph/cluster/upgrade/upgrade-progress/upgrade-progress.component';
 import { MultiClusterComponent } from './ceph/cluster/multi-cluster/multi-cluster.component';
 import { MultiClusterListComponent } from './ceph/cluster/multi-cluster/multi-cluster-list/multi-cluster-list.component';
+import { MultiClusterDetailsComponent } from './ceph/cluster/multi-cluster/multi-cluster-details/multi-cluster-details.component';
+import { SmbClusterFormComponent } from './ceph/smb/smb-cluster-form/smb-cluster-form.component';
+import { SmbTabsComponent } from './ceph/smb/smb-tabs/smb-tabs.component';
+import { SmbShareFormComponent } from './ceph/smb/smb-share-form/smb-share-form.component';
+import { SmbJoinAuthFormComponent } from './ceph/smb/smb-join-auth-form/smb-join-auth-form.component';
+import { SmbUsersgroupsFormComponent } from './ceph/smb/smb-usersgroups-form/smb-usersgroups-form.component';
 
 @Injectable()
 export class PerformanceCounterBreadcrumbsResolver extends BreadcrumbsResolver {
@@ -107,7 +113,7 @@ const routes: Routes = [
             redirectTo: 'dashboard',
             backend: 'cephadm'
           },
-          breadcrumbs: 'Expand Cluster'
+          breadcrumbs: 'Cluster/Expand Cluster'
         }
       },
       {
@@ -180,6 +186,11 @@ const routes: Routes = [
             outlet: 'modal'
           },
           {
+            path: `${URLVerbs.CREATE}/:type`,
+            component: ServiceFormComponent,
+            outlet: 'modal'
+          },
+          {
             path: `${URLVerbs.EDIT}/:type/:name`,
             component: ServiceFormComponent,
             outlet: 'modal'
@@ -198,7 +209,13 @@ const routes: Routes = [
             component: MultiClusterListComponent,
             data: {
               breadcrumbs: 'Multi-Cluster/Manage Clusters'
-            }
+            },
+            children: [
+              {
+                path: 'performance-details',
+                component: MultiClusterDetailsComponent
+              }
+            ]
           }
         ]
       },
@@ -370,18 +387,104 @@ const routes: Routes = [
       {
         path: 'cephfs',
         canActivate: [FeatureTogglesGuardService],
-        data: { breadcrumbs: 'File/File Systems' },
         children: [
-          { path: '', component: CephfsListComponent },
           {
-            path: URLVerbs.CREATE,
+            path: 'fs',
+            component: CephfsListComponent,
+            data: { breadcrumbs: 'File/File Systems' }
+          },
+          {
+            path: `fs/${URLVerbs.CREATE}`,
             component: CephfsVolumeFormComponent,
             data: { breadcrumbs: ActionLabels.CREATE }
           },
           {
-            path: `${URLVerbs.EDIT}/:id`,
+            path: `fs/${URLVerbs.EDIT}/:id`,
             component: CephfsVolumeFormComponent,
             data: { breadcrumbs: ActionLabels.EDIT }
+          },
+          {
+            path: 'nfs',
+            canActivateChild: [FeatureTogglesGuardService, ModuleStatusGuardService],
+            data: {
+              moduleStatusGuardConfig: {
+                uiApiPath: 'nfs-ganesha',
+                redirectTo: 'error',
+                section: 'nfs-ganesha',
+                section_info: 'NFS GANESHA',
+                header: 'NFS-Ganesha is not configured'
+              },
+              breadcrumbs: 'File/NFS'
+            },
+            children: [
+              { path: '', component: NfsListComponent },
+              {
+                path: `${URLVerbs.CREATE}/:fs_name/:subvolume_group`,
+                component: NfsFormComponent,
+                data: { breadcrumbs: ActionLabels.CREATE }
+              },
+              {
+                path: `${URLVerbs.CREATE}`,
+                component: NfsFormComponent,
+                data: { breadcrumbs: ActionLabels.CREATE }
+              },
+              {
+                path: `${URLVerbs.EDIT}/:cluster_id/:export_id`,
+                component: NfsFormComponent,
+                data: { breadcrumbs: ActionLabels.EDIT }
+              }
+            ]
+          },
+          {
+            path: 'smb',
+            canActivateChild: [ModuleStatusGuardService],
+            data: {
+              moduleStatusGuardConfig: {
+                uiApiPath: 'smb',
+                redirectTo: 'error',
+                header: 'SMB module is not enabled',
+                button_to_enable_module: 'smb',
+                navigate_to: 'cephfs/smb'
+              },
+              breadcrumbs: 'File/SMB'
+            },
+            children: [
+              { path: '', component: SmbTabsComponent },
+              {
+                path: `${URLVerbs.CREATE}`,
+                component: SmbClusterFormComponent,
+                data: { breadcrumbs: ActionLabels.CREATE }
+              },
+              {
+                path: `share/${URLVerbs.CREATE}/:clusterId`,
+                component: SmbShareFormComponent,
+                data: { breadcrumbs: ActionLabels.CREATE }
+              },
+              {
+                path: `ad/${URLVerbs.CREATE}`,
+                component: SmbJoinAuthFormComponent,
+                data: { breadcrumbs: ActionLabels.CREATE }
+              },
+              {
+                path: `ad/${URLVerbs.EDIT}/:authId`,
+                component: SmbJoinAuthFormComponent,
+                data: { breadcrumbs: ActionLabels.EDIT }
+              },
+              {
+                path: `standalone/${URLVerbs.CREATE}`,
+                component: SmbUsersgroupsFormComponent,
+                data: { breadcrumbs: ActionLabels.CREATE }
+              },
+              {
+                path: `standalone/${URLVerbs.EDIT}/:usersGroupsId`,
+                component: SmbUsersgroupsFormComponent
+              },
+              {
+                path: `share/${URLVerbs.EDIT}/:clusterId/:shareId`,
+                component: SmbShareFormComponent,
+                data: { breadcrumbs: ActionLabels.EDIT }
+              }
+            ]
           }
         ]
       },
@@ -418,34 +521,6 @@ const routes: Routes = [
             path: URLVerbs.EDIT,
             component: UserPasswordFormComponent,
             canActivate: [NoSsoGuardService],
-            data: { breadcrumbs: ActionLabels.EDIT }
-          }
-        ]
-      },
-      // NFS
-      {
-        path: 'nfs',
-        canActivateChild: [FeatureTogglesGuardService, ModuleStatusGuardService],
-        data: {
-          moduleStatusGuardConfig: {
-            uiApiPath: 'nfs-ganesha',
-            redirectTo: 'error',
-            section: 'nfs-ganesha',
-            section_info: 'NFS GANESHA',
-            header: 'NFS-Ganesha is not configured'
-          },
-          breadcrumbs: 'NFS'
-        },
-        children: [
-          { path: '', component: NfsListComponent },
-          {
-            path: URLVerbs.CREATE,
-            component: NfsFormComponent,
-            data: { breadcrumbs: ActionLabels.CREATE }
-          },
-          {
-            path: `${URLVerbs.EDIT}/:cluster_id/:export_id`,
-            component: NfsFormComponent,
             data: { breadcrumbs: ActionLabels.EDIT }
           }
         ]

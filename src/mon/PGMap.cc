@@ -1,22 +1,30 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 
-#include <boost/algorithm/string.hpp>
+#include "PGMap.h"
+#include "mon/health_check.h"
+#include "common/ceph_context.h"
 
 #include "include/rados.h"
-#include "PGMap.h"
 
 #define dout_subsys ceph_subsys_mon
 #include "common/debug.h"
 #include "common/Clock.h"
 #include "common/Formatter.h"
+#include "common/TextTable.h"
 #include "global/global_context.h"
 #include "include/ceph_features.h"
+#include "include/health.h"
 #include "include/stringify.h"
 
 #include "osd/osd_types.h"
 #include "osd/OSDMap.h"
+
+#include <boost/algorithm/string.hpp>
 #include <boost/range/adaptor/reversed.hpp>
+
+#include <iomanip> // for std::setw()
+#include <sstream>
 
 #define dout_context g_ceph_context
 
@@ -881,10 +889,6 @@ void PGMapDigest::dump_object_stat_sum(
 {
   const object_stat_sum_t &sum = pool_stat.stats.sum;
   const store_statfs_t statfs = pool_stat.store_stats;
-
-  if (sum.num_object_copies > 0) {
-    raw_used_rate *= (float)(sum.num_object_copies - sum.num_objects_degraded) / sum.num_object_copies;
-  }
 
   uint64_t used_data_bytes = pool_stat.get_allocated_data_bytes(per_pool);
   uint64_t used_omap_bytes = pool_stat.get_allocated_omap_bytes(per_pool_omap);
@@ -3238,6 +3242,14 @@ void PGMap::get_health_checks(
 	summary += " reporting legacy (not per-pool) BlueStore omap usage stats";
       } else if (asum.first == "BLUESTORE_SPURIOUS_READ_ERRORS") {
         summary += " have spurious read errors";
+      } else if (asum.first == "BLUESTORE_SLOW_OP_ALERT") {
+        summary += " experiencing slow operations in BlueStore";
+      } else if (asum.first == "BLOCK_DEVICE_STALLED_READ_ALERT") {
+        summary += " experiencing stalled read in block device of BlueStore";
+      } else if (asum.first == "WAL_DEVICE_STALLED_READ_ALERT") {
+        summary += " experiencing stalled read in wal device of BlueFS";
+      } else if (asum.first == "DB_DEVICE_STALLED_READ_ALERT") {
+        summary += " experiencing stalled read in db device of BlueFS";
       }
 
       auto& d = checks->add(asum.first, HEALTH_WARN, summary, asum.second.first);
@@ -3348,9 +3360,13 @@ void PGMap::get_health_checks(
       // application metadata is not encoded until luminous is minimum
       // required release
       if (pool.application_metadata.empty() && !pool.is_tier()) {
-        stringstream ss;
-        ss << "application not enabled on pool '" << pool_name << "'";
-        detail.push_back(ss.str());
+        utime_t now(ceph::real_clock::now());
+        if ((now - pool.get_create_time()) >
+            g_conf().get_val<std::chrono::seconds>("mon_warn_on_pool_no_app_grace").count()) {
+          stringstream ss;
+          ss << "application not enabled on pool '" << pool_name << "'";
+          detail.push_back(ss.str());
+        }
       }
     }
     if (!detail.empty()) {

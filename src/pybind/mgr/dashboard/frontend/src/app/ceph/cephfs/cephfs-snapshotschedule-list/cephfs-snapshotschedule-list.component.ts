@@ -19,7 +19,6 @@ import { CdTableSelection } from '~/app/shared/models/cd-table-selection';
 import { Permissions } from '~/app/shared/models/permissions';
 import { SnapshotSchedule } from '~/app/shared/models/snapshot-schedule';
 import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
-import { ModalService } from '~/app/shared/services/modal.service';
 import { Icons } from '~/app/shared/enum/icons.enum';
 import { CellTemplate } from '~/app/shared/enum/cell-template.enum';
 import { MgrModuleService } from '~/app/shared/api/mgr-module.service';
@@ -28,9 +27,10 @@ import { BlockUI, NgBlockUI } from 'ng-block-ui';
 import { NotificationType } from '~/app/shared/enum/notification-type.enum';
 import { ActionLabelsI18n, URLVerbs } from '~/app/shared/constants/app.constants';
 import { CephfsSnapshotscheduleFormComponent } from '../cephfs-snapshotschedule-form/cephfs-snapshotschedule-form.component';
-import { CriticalConfirmationModalComponent } from '~/app/shared/components/critical-confirmation-modal/critical-confirmation-modal.component';
+import { DeleteConfirmationModalComponent } from '~/app/shared/components/delete-confirmation-modal/delete-confirmation-modal.component';
 import { TaskWrapperService } from '~/app/shared/services/task-wrapper.service';
 import { FinishedTask } from '~/app/shared/models/finished-task';
+import { ModalCdsService } from '~/app/shared/services/modal-cds.service';
 
 @Component({
   selector: 'cd-cephfs-snapshotschedule-list',
@@ -68,26 +68,7 @@ export class CephfsSnapshotscheduleListComponent
   errorMessage: string = '';
   selectedName: string = '';
   icons = Icons;
-  tableActions: CdTableAction[] = [
-    {
-      name: this.actionLabels.CREATE,
-      permission: 'create',
-      icon: Icons.add,
-      click: () => this.openModal(false)
-    },
-    {
-      name: this.actionLabels.EDIT,
-      permission: 'update',
-      icon: Icons.edit,
-      click: () => this.openModal(true)
-    },
-    {
-      name: this.actionLabels.DELETE,
-      permission: 'delete',
-      icon: Icons.trash,
-      click: () => this.deleteSnapshotSchedule()
-    }
-  ];
+  tableActions!: CdTableAction[];
 
   MODULE_NAME = 'snap_schedule';
   ENABLE_MODULE_TIMER = 2 * 1000;
@@ -95,7 +76,7 @@ export class CephfsSnapshotscheduleListComponent
   constructor(
     private snapshotScheduleService: CephfsSnapshotScheduleService,
     private authStorageService: AuthStorageService,
-    private modalService: ModalService,
+    private modalService: ModalCdsService,
     private mgrModuleService: MgrModuleService,
     private notificationService: NotificationService,
     private actionLabels: ActionLabelsI18n,
@@ -112,6 +93,27 @@ export class CephfsSnapshotscheduleListComponent
   }
 
   ngOnInit(): void {
+    this.tableActions = [
+      {
+        name: this.actionLabels.CREATE,
+        permission: 'create',
+        icon: Icons.add,
+        click: () => this.openModal(false)
+      },
+      {
+        name: this.actionLabels.EDIT,
+        permission: 'update',
+        icon: Icons.edit,
+        click: () => this.openModal(true)
+      },
+      {
+        name: this.actionLabels.DELETE,
+        permission: 'delete',
+        icon: Icons.trash,
+        click: () => this.deleteSnapshotSchedule()
+      }
+    ];
+
     this.moduleServiceListSub = this.mgrModuleService
       .list()
       .pipe(
@@ -184,20 +186,16 @@ export class CephfsSnapshotscheduleListComponent
   }
 
   openModal(edit = false) {
-    this.modalService.show(
-      CephfsSnapshotscheduleFormComponent,
-      {
-        fsName: this.fsName,
-        id: this.id,
-        path: this.selection?.first()?.path,
-        schedule: this.selection?.first()?.schedule,
-        retention: this.selection?.first()?.retention,
-        start: this.selection?.first()?.start,
-        status: this.selection?.first()?.status,
-        isEdit: edit
-      },
-      { size: 'lg' }
-    );
+    this.modalService.show(CephfsSnapshotscheduleFormComponent, {
+      fsName: this.fsName,
+      id: this.id,
+      path: this.selection?.first()?.path,
+      schedule: this.selection?.first()?.schedule,
+      retention: this.selection?.first()?.retention,
+      start: this.selection?.first()?.start,
+      status: this.selection?.first()?.status,
+      isEdit: edit
+    });
   }
 
   enableSnapshotSchedule() {
@@ -247,7 +245,7 @@ export class CephfsSnapshotscheduleListComponent
   deactivateSnapshotSchedule() {
     const { path, start, fs, schedule, subvol, group } = this.selection.first();
 
-    this.modalRef = this.modalService.show(CriticalConfirmationModalComponent, {
+    this.modalRef = this.modalService.show(DeleteConfirmationModalComponent, {
       itemDescription: $localize`snapshot schedule`,
       actionDescription: this.actionLabels.DEACTIVATE,
       submitActionObservable: () =>
@@ -270,7 +268,7 @@ export class CephfsSnapshotscheduleListComponent
   activateSnapshotSchedule() {
     const { path, start, fs, schedule, subvol, group } = this.selection.first();
 
-    this.modalRef = this.modalService.show(CriticalConfirmationModalComponent, {
+    this.modalRef = this.modalService.show(DeleteConfirmationModalComponent, {
       itemDescription: $localize`snapshot schedule`,
       actionDescription: this.actionLabels.ACTIVATE,
       submitActionObservable: () =>
@@ -302,7 +300,7 @@ export class CephfsSnapshotscheduleListComponent
       })
       ?.join('|');
 
-    this.modalRef = this.modalService.show(CriticalConfirmationModalComponent, {
+    this.modalRef = this.modalService.show(DeleteConfirmationModalComponent, {
       itemDescription: $localize`snapshot schedule`,
       submitActionObservable: () =>
         this.taskWrapper.wrapTaskAroundCall({

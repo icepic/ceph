@@ -270,10 +270,14 @@ bool is_osd_writable(const OSDCapGrant& grant, const std::string* pool_name) {
     auto& match = grant.match;
     if (match.is_match_all()) {
       return true;
-    } else if (pool_name != nullptr &&
-               !match.pool_namespace.pool_name.empty() &&
-               match.pool_namespace.pool_name == *pool_name) {
-      return true;
+    } else if (pool_name != nullptr) {
+      if (!match.pool_namespace.pool_name.empty()) {
+        if (match.pool_namespace.pool_name == *pool_name) {
+          return true;
+        }
+      } else if (match.pool_tag.is_match_all()) {
+        return true;
+      }
     }
   }
   return false;
@@ -983,6 +987,8 @@ void OSDMonitor::update_from_paxos(bool *need_bootstrap)
       dout(20) << "Checking degraded stretch mode due to osd changes" << dendl;
       mon.maybe_go_degraded_stretch_mode();
     }
+  } else {
+    mon.try_disable_stretch_mode();
   }
 }
 
@@ -3034,27 +3040,26 @@ bool OSDMonitor::preprocess_mark_me_dead(MonOpRequestRef op)
   int from = m->target_osd;
 
   // check permissions
-  if (check_source(op, m->fsid)) {
-    mon.no_reply(op);
-    return true;
-  }
+  if (check_source(op, m->fsid))
+    goto done;
 
   // first, verify the reporting host is valid
-  if (!m->get_orig_source().is_osd()) {
-    mon.no_reply(op);
-    return true;
-  }
+  if (!m->get_orig_source().is_osd())
+    goto done;
 
   if (!osdmap.exists(from) ||
       !osdmap.is_down(from)) {
     dout(5) << __func__ << " from nonexistent or up osd." << from
 	    << ", ignoring" << dendl;
     send_incremental(op, m->get_epoch()+1);
-    mon.no_reply(op);
-    return true;
+    goto done;
   }
 
   return false;
+
+ done:
+  mon.no_reply(op);
+  return true;
 }
 
 bool OSDMonitor::prepare_mark_me_dead(MonOpRequestRef op)
@@ -5219,9 +5224,7 @@ void OSDMonitor::tick()
   }
 
   // expire blocklisted items?
-  for (ceph::unordered_map<entity_addr_t,utime_t>::iterator p = osdmap.blocklist.begin();
-       p != osdmap.blocklist.end();
-       ++p) {
+  for (auto p = osdmap.blocklist.begin(); p != osdmap.blocklist.end(); ++p) {
     if (p->second < now) {
       dout(10) << "expiring blocklist item " << p->first << " expired " << p->second << " < now " << now << dendl;
       pending_inc.old_blocklist.push_back(p->first);
@@ -5987,9 +5990,7 @@ bool OSDMonitor::preprocess_command(MonOpRequestRef op)
     if (f)
       f->open_array_section("blocklist");
 
-    for (ceph::unordered_map<entity_addr_t,utime_t>::iterator p = osdmap.blocklist.begin();
-	 p != osdmap.blocklist.end();
-	 ++p) {
+    for (auto p = osdmap.blocklist.begin(); p != osdmap.blocklist.end(); ++p) {
       if (f) {
 	f->open_object_section("entry");
 	f->dump_string("addr", p->first.get_legacy_str());
@@ -6089,6 +6090,62 @@ bool OSDMonitor::preprocess_command(MonOpRequestRef op)
     }
     r = 0;
 
+  } else if (prefix == "osd pool stretch show") {
+    string poolstr;
+    cmd_getval(cmdmap, "pool", poolstr);
+    int64_t pool = osdmap.lookup_pg_pool_name(poolstr);
+    if (pool < 0) {
+      ss << "unrecognized pool '" << poolstr << "'";
+      r = -ENOENT;
+      goto reply;
+    }
+    const pg_pool_t *p = osdmap.get_pg_pool(pool);
+
+    if (!p->is_stretch_pool()) {
+      ss << poolstr << " " << " is not a stretch pool.";
+      r = -ENOENT;
+      goto reply;
+    } else {
+      if (f) {
+        f->open_object_section("pool");
+        f->dump_string("pool", poolstr);
+        f->dump_int("pool_id", pool);
+        f->dump_bool("is_stretch_pool", p->is_stretch_pool());
+        f->dump_int("peering_crush_bucket_count", p->peering_crush_bucket_count);
+        f->dump_int("peering_crush_bucket_target", p->peering_crush_bucket_target);
+        f->dump_string("peering_crush_bucket_barrier", stringify(osdmap.crush->get_type_name(p->peering_crush_bucket_barrier)));
+        if (osdmap.crush->rule_exists(p->get_crush_rule())) {
+          f->dump_string("crush_rule", osdmap.crush->get_rule_name(p->get_crush_rule()));
+        } else {
+          f->dump_string("crush_rule", stringify(p->get_crush_rule()));
+          // warn if the rule does not exist
+          mon.clog->warn() << __func__ << " pool " << poolstr << " crush rule " << stringify(p->get_crush_rule()) << " does not exist";
+        }
+        f->dump_int("size", p->get_size());
+        f->dump_int("min_size", p->get_min_size());
+        f->close_section();
+        f->flush(rdata);
+      } else {
+        stringstream ss;
+        ss << "pool: " << poolstr << "\n";
+        ss << "pool_id: " << pool << "\n";
+        ss << "is_stretch_pool: " << p->is_stretch_pool() << "\n";
+        ss << "peering_crush_bucket_count: " << p->peering_crush_bucket_count << "\n";
+        ss << "peering_crush_bucket_target: " << p->peering_crush_bucket_target << "\n";
+        ss << "peering_crush_bucket_barrier: " << osdmap.crush->get_type_name(p->peering_crush_bucket_barrier) << "\n";
+        if (osdmap.crush->rule_exists(p->get_crush_rule())) {
+          ss << "crush_rule: " << osdmap.crush->get_rule_name(p->get_crush_rule()) << "\n";
+        } else {
+          ss << "crush_rule: " << p->get_crush_rule() << "\n";
+          // warn if the rule does not exist
+          mon.clog->warn() << __func__ << " pool " << poolstr << " crush rule " << stringify(p->get_crush_rule()) << " does not exist";
+        }
+        ss << "size: " << p->get_size() << "\n";
+        ss << "min_size: " << p->get_min_size() << "\n";
+        rdata.append(ss.str());
+      }
+    }
+    r = 0;
   } else if (prefix == "osd pool get") {
     string poolstr;
     cmd_getval(cmdmap, "pool", poolstr);
@@ -7496,6 +7553,11 @@ int OSDMonitor::crush_rule_create_erasure(const string &name,
     erasure_code.reset();
     if (err < 0)
       return err;
+
+    if (!validate_crush_against_features(&newcrush, *ss)) {
+      return -EINVAL;
+    }
+
     *rule = err;
     pending_inc.crush.clear();
     newcrush.encode(pending_inc.crush, mon.get_quorum_con_features());
@@ -7571,7 +7633,7 @@ int OSDMonitor::check_cluster_features(uint64_t features,
 }
 
 bool OSDMonitor::validate_crush_against_features(const CrushWrapper *newcrush,
-                                                 stringstream& ss)
+                                                 ostream &ss)
 {
   OSDMap::Incremental new_pending = pending_inc;
   encode(*newcrush, new_pending.crush, mon.get_quorum_con_features());
@@ -9040,6 +9102,149 @@ int OSDMonitor::prepare_command_pool_application(const string &prefix,
                                                  stringstream& ss)
 {
   return _command_pool_application(prefix, cmdmap, ss, nullptr, true);
+}
+
+int OSDMonitor::prepare_command_pool_stretch_set(const cmdmap_t& cmdmap,
+                                                    stringstream& ss)
+{
+  string pool_name;
+  cmd_getval(cmdmap, "pool", pool_name);
+  int64_t pool = osdmap.lookup_pg_pool_name(pool_name);
+  if (pool < 0) {
+    ss << "unrecognized pool '" << pool_name << "'";
+    return -ENOENT;
+  }
+
+  pg_pool_t p = *osdmap.get_pg_pool(pool);
+  if (pending_inc.new_pools.count(pool))
+    p = pending_inc.new_pools[pool];
+
+  int64_t bucket_count = cmd_getval_or<int64_t>(cmdmap, "peering_crush_bucket_count", 0);
+  if (bucket_count <= 0) {
+    ss << "peering_crush_bucket_count must be >= 0! FYI use 'ceph osd pool stretch unset' to unset the stretch values";
+    return -EINVAL;
+  }
+
+  int64_t bucket_target = cmd_getval_or<int64_t>(cmdmap, "peering_crush_bucket_target", 0);
+  if (bucket_target <= 0) {
+    ss << "peering_crush_bucket_target must be >= 0! FYI use 'ceph osd pool stretch unset' to unset the stretch values";
+    return -EINVAL;
+  }
+
+  int bucket_barrier = 0;
+  string bucket_barrier_str;
+  cmd_getval(cmdmap, "peering_crush_bucket_barrier", bucket_barrier_str);
+  CrushWrapper& crush = _get_stable_crush();
+  if (bucket_barrier_str.empty()) {
+    ss << "peering_crush_bucket_barrier must be provided";
+    return -EINVAL;
+  } else {
+    bucket_barrier = crush.get_type_id(bucket_barrier_str);
+    if (bucket_barrier < 0) {
+      ss << "peering_crush_bucket_barrier " << bucket_barrier_str << " does not exist";
+      return -EINVAL;
+    } else if (bucket_barrier == 0) {
+      ss << "peering_crush_bucket_barrier " << bucket_barrier_str << " is not a bucket type";
+      return -EINVAL;
+    }
+  }
+  // Check if the number of peering_crush_bucket_count and peering_crush_bucket_target
+  // exceeds the number of subtrees of the specified bucket_barrier in the cluster.
+  vector<int> subtrees;
+  bool sure = false;
+  crush.get_subtree_of_type(bucket_barrier, &subtrees);
+  cmd_getval(cmdmap, "yes_i_really_mean_it", sure);
+  if (static_cast<uint32_t>(bucket_count) > subtrees.size()) {
+    if (!sure) {
+      ss << "peering_crush_bucket_count=" << bucket_count
+        << " > " << bucket_barrier_str << "=" <<  subtrees.size()
+        << " can lead to data unavailability, pass --yes-i-really-mean-it to proceed";
+      return -EPERM;
+    }
+  } else if (static_cast<uint32_t>(bucket_target) > subtrees.size()) {
+    if (!sure) {
+      ss << "peering_crush_bucket_target=" << bucket_target
+        << " > " << bucket_barrier_str << "=" <<  subtrees.size()
+        << " can lead to data unavailability, pass --yes-i-really-mean-it to proceed";
+      return -EPERM;
+    }
+  }
+
+  string crush_rule_str;
+  cmd_getval(cmdmap, "crush_rule", crush_rule_str);
+  if (crush_rule_str.empty()) {
+    ss << "crush_rule must be provided";
+    return -EINVAL;
+  }
+  int crush_rule = crush.get_rule_id(crush_rule_str);
+  if (crush_rule < 0) {
+    ss << "crush rule " << crush_rule_str << " does not exist";
+    return -ENOENT;
+  }
+  if (!crush.rule_valid_for_pool_type(crush_rule, p.get_type())) {
+    ss << "crush rule " << crush_rule << " type does not match pool";
+    return -EINVAL;
+  }
+  int64_t pool_size = cmd_getval_or<int64_t>(cmdmap, "size", 0);
+  if (pool_size < 0) {
+    ss << "pool size must be non-negative";
+    return -EINVAL;
+  }
+
+  int64_t pool_min_size = cmd_getval_or<int64_t>(cmdmap, "min_size", 0);
+  if (pool_min_size < 0) {
+    ss << "pool min_size must be non-negative";
+    return -EINVAL;
+  }
+
+  p.peering_crush_bucket_count = static_cast<uint32_t>(bucket_count);
+  p.peering_crush_bucket_target = static_cast<uint32_t>(bucket_target);
+  p.peering_crush_bucket_barrier = static_cast<uint32_t>(bucket_barrier);
+  p.crush_rule = static_cast<__u8>(crush_rule);
+  p.size = static_cast<__u8>(pool_size);
+  p.min_size = static_cast<__u8>(pool_min_size);
+  p.last_change = pending_inc.epoch;
+  pending_inc.new_pools[pool] = p;
+  ss << "pool " << pool_name << " stretch values are set successfully";
+  return 0;
+}
+
+int OSDMonitor::prepare_command_pool_stretch_unset(const cmdmap_t& cmdmap,
+                                                    stringstream& ss)
+{
+  /**
+  * Command syntax:
+  *   ceph osd pool stretch unset <pool>
+  */
+  string pool_name;
+  cmd_getval(cmdmap, "pool", pool_name);
+  int64_t pool = osdmap.lookup_pg_pool_name(pool_name);
+  // check if pool exists
+  if (pool < 0) {
+    ss << "unrecognized pool '" << pool_name << "'";
+    return -ENOENT;
+  }
+
+  // get pool
+  pg_pool_t p = *osdmap.get_pg_pool(pool);
+  if (pending_inc.new_pools.count(pool))
+    p = pending_inc.new_pools[pool];
+  
+  // check if pool is a stretch pool
+  if (!p.is_stretch_pool()) {
+    ss << "pool " << pool_name << " is not a stretch pool";
+    return -ENOENT;
+  }
+
+  // unset stretch values
+  p.peering_crush_bucket_count = 0;
+  p.peering_crush_bucket_target = 0;
+  p.peering_crush_bucket_barrier = 0;
+  p.last_change = pending_inc.epoch;
+  pending_inc.new_pools[pool] = p;
+  ss << "pool " << pool_name
+    << " is no longer a stretch pool, all stretch values are unset successfully";
+  return 0;
 }
 
 int OSDMonitor::preprocess_command_pool_application(const string &prefix,
@@ -12238,25 +12443,27 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
 
     ceph_release_t min_release = ceph_release_t::unknown;
     string feature_name = "unknown";
+    uint64_t min_feature = CEPH_FEATURES_ALL; // paranoia
     switch (upmap_option) {
     case OP_PG_UPMAP: 		// fall through
     case OP_RM_PG_UPMAP:	// fall through
     case OP_PG_UPMAP_ITEMS:	// fall through
     case OP_RM_PG_UPMAP_ITEMS:
       min_release = ceph_release_t::luminous;
+      min_feature = CEPH_FEATUREMASK_OSDMAP_PG_UPMAP;
       feature_name = "pg-upmap";
       break;
 
     case OP_PG_UPMAP_PRIMARY:	// fall through
     case OP_RM_PG_UPMAP_PRIMARY:
       min_release = ceph_release_t::reef;
+      min_feature = CEPH_FEATUREMASK_SERVER_REEF;
       feature_name = "pg-upmap-primary";
       break;
 
     default:
       ceph_abort_msg("invalid upmap option");
     }
-    uint64_t min_feature = CEPH_FEATUREMASK_OSDMAP_PG_UPMAP;
     string min_release_name = ceph_release_name(static_cast<int>(min_release));
 
     if (osdmap.require_min_compat_client < min_release) {
@@ -12269,7 +12476,6 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
       goto reply_no_propose;
     }
 
-    //TODO: Should I add feature and test for upmap-primary?
     err = check_cluster_features(min_feature, ss);
     if (err == -EAGAIN)
       goto wait;
@@ -13104,6 +13310,100 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
     wait_for_commit(op, new Monitor::C_Command(mon, op, 0, rs,
 					      get_last_committed() + 1));
     return true;
+  } else if (prefix == "osd pool force-remove-snap") {
+    /*
+     *  Forces removal of snapshots in the range of
+     *  [lower_snapid_bound, upper_snapid_bound) on pool <pool>
+     *  in order to cause OSDs to re-trim them.
+     *  The command has two mutually exclusive variants:
+     *  * Default: All the snapids in the given range which are not
+     *    marked as purged in the Monitor will be removed. Mostly useful
+     *    for cases in which the snapid is leaked in the client side.
+     *    See: https://tracker.ceph.com/issues/64646
+     */
+    string poolstr;
+    cmd_getval(cmdmap, "pool", poolstr);
+    int64_t pool = osdmap.lookup_pg_pool_name(poolstr.c_str());
+    if (pool < 0) {
+      ss << "unrecognized pool '" << poolstr << "'";
+      err = -ENOENT;
+      goto reply_no_propose;
+    }
+
+    const pg_pool_t *p = osdmap.get_pg_pool(pool);
+    pg_pool_t *pp = nullptr;
+    if (pending_inc.new_pools.count(pool))
+      pp = &pending_inc.new_pools[pool];
+    if (!pp) {
+      pp = &pending_inc.new_pools[pool];
+      *pp = *p;
+    }
+
+    if (!p->is_unmanaged_snaps_mode() && !p->is_pool_snaps_mode()) {
+      ss << "pool " << poolstr << " invalid snaps mode";
+      err = -EINVAL;
+      goto reply_no_propose;
+    }
+
+    int64_t lower_snapid_bound =
+      cmd_getval_or<int64_t>(cmdmap, "lower_snapid_bound", 1);
+    int64_t upper_snapid_bound =
+      cmd_getval_or<int64_t>(cmdmap, "upper_snapid_bound",
+                             (int64_t)p->get_snap_seq());
+
+    if (lower_snapid_bound > upper_snapid_bound) {
+      ss << "error, lower bound can't be higher than higher bound";
+      err = -ENOENT;
+      goto reply_no_propose;
+    }
+
+    bool dry_run = false;
+    cmd_getval(cmdmap, "dry_run", dry_run);
+
+    // don't redelete past pool's snap_seq
+    auto snapid_limit = std::min(upper_snapid_bound, (int64_t)p->get_snap_seq());
+
+    if (dry_run) {
+      ss << "Dry run: ";
+    }
+
+    ss << "force removing snap ids in the range of [" << lower_snapid_bound << ","
+       << snapid_limit << ") from pool " << pool << ". ";
+
+    std::set<int64_t> force_removed_snapids;
+    for (auto i = lower_snapid_bound; i < snapid_limit; i++) {
+      snapid_t before_begin, before_end;
+      int res = lookup_purged_snap(pool, i, &before_begin, &before_end);
+      if (res == 0) {
+        ss << "snapids: " << i << " was already marked as purged. ";
+      } else {
+        // Remove non purged_snaps
+        // See: https://tracker.ceph.com/issues/64646
+        force_removed_snapids.insert(i);
+      }
+    }
+
+    for (const auto i : force_removed_snapids) {
+      if (!dry_run) {
+        pending_inc.new_removed_snaps[pool].insert(snapid_t(i));
+      }
+    }
+
+    if (force_removed_snapids.size()) {
+      ss << "removed snapids: " << force_removed_snapids;
+    } else {
+      ss << "no snapshots were removed";
+    }
+
+    if (dry_run) {
+      err = 0;
+      goto reply_no_propose;
+    }
+    pp->set_snap_epoch(pending_inc.epoch);
+    getline(ss, rs);
+    wait_for_finished_proposal(op, new Monitor::C_Command(mon, op, 0, rs,
+                               get_last_committed() + 1));
+    return true;
   } else if (prefix == "osd pool create") {
     int64_t pg_num = cmd_getval_or<int64_t>(cmdmap, "pg_num", 0);
     int64_t pg_num_min = cmd_getval_or<int64_t>(cmdmap, "pg_num_min", 0);
@@ -13897,6 +14197,28 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
     } else {
       goto update;
     }
+  } else if (prefix == "osd pool stretch set") {
+    err = prepare_command_pool_stretch_set(cmdmap, ss);
+    if (err == -EAGAIN)
+      goto wait;
+    if (err < 0)
+      goto reply_no_propose;
+
+    getline(ss, rs);
+    wait_for_commit(op, new Monitor::C_Command(mon, op, 0, rs,
+						   get_last_committed() + 1));
+    return true;
+  } else if (prefix == "osd pool stretch unset") {
+    err = prepare_command_pool_stretch_unset(cmdmap, ss);
+    if (err == -EAGAIN)
+      goto wait;
+    if (err < 0)
+      goto reply_no_propose;
+
+    getline(ss, rs);
+    wait_for_commit(op, new Monitor::C_Command(mon, op, 0, rs,
+						   get_last_committed() + 1));
+    return true;
   } else if (prefix == "osd force-create-pg") {
     pg_t pgid;
     string pgidstr;
@@ -14629,6 +14951,25 @@ int OSDMonitor::_prepare_remove_pool(
       }
     }
   }
+  // remove any old pg_upmap_primary mapping for this pool
+  for (auto& p : osdmap.pg_upmap_primaries) {
+    if (p.first.pool() == pool) {
+      dout(10) << __func__ << " " << pool
+               << " removing obsolete pg_upmap_primaries " << p.first
+               << dendl;
+      pending_inc.old_pg_upmap_primary.insert(p.first);
+    }
+  }
+
+  // remove any pending pg_upmap_primary mapping for this pool
+  for (auto& p : osdmap.pg_upmap_primaries) {
+    if (p.first.pool() == pool) {
+      dout(10) << __func__ << " " << pool
+               << " removing pending pg_upmap_primaries " << p.first
+               << dendl;
+      pending_inc.new_pg_upmap_primary.erase(p.first);
+    }
+  }
 
   // remove any choose_args for this pool
   CrushWrapper newcrush = _get_pending_crush();
@@ -14738,6 +15079,65 @@ void OSDMonitor::convert_pool_priorities(void)
     pool.last_change = pending_inc.epoch;
     pending_inc.new_pools[pool_id] = pool;
   }
+}
+
+void OSDMonitor::try_disable_stretch_mode(stringstream& ss,
+     bool *okay,
+     int *errcode,
+     const string& crush_rule)
+{
+  dout(20) << __func__ << dendl;
+  *okay = false;
+  if (!osdmap.stretch_mode_enabled) {
+    ss << "stretch mode is already disabled";
+    *errcode = -EINVAL;
+    return;
+  }
+  if (osdmap.recovering_stretch_mode) {
+    ss << "stretch mode is currently recovering and cannot be disabled";
+    *errcode = -EBUSY;
+    return;
+  }
+  for (const auto& pi : osdmap.get_pools()) {
+    pg_pool_t *pool = pending_inc.get_new_pool(pi.first, &pi.second);
+    pool->peering_crush_bucket_count = 0;
+    pool->peering_crush_bucket_target = 0;
+    pool->peering_crush_bucket_barrier = 0;
+    pool->peering_crush_mandatory_member = CRUSH_ITEM_NONE;
+    pool->size = g_conf().get_val<uint64_t>("osd_pool_default_size");
+    pool->min_size = g_conf().get_osd_pool_default_min_size(pool->size);
+    // if crush rule is supplied, use it if it exists in crush map
+    if (!crush_rule.empty()) {
+      int crush_rule_id = osdmap.crush->get_rule_id(crush_rule);
+      if (crush_rule_id < 0) {
+        ss << "unrecognized crush rule " << crush_rule;
+        *errcode = -EINVAL;
+        return;
+      }
+      if (!osdmap.crush->rule_valid_for_pool_type(crush_rule_id, pool->get_type())) {
+        ss << "crush rule " << crush_rule << " type does not match pool type";
+        *errcode = -EINVAL;
+        return;
+      }
+      if (crush_rule_id == pool->crush_rule) {
+        ss << "You can't disable stretch mode with the same crush rule you are using";
+        *errcode = -EINVAL;
+        return;
+      }
+      pool->crush_rule = crush_rule_id;
+    } else {
+      // otherwise, use the default rule
+      pool->crush_rule = osdmap.crush->get_osd_pool_default_crush_replicated_rule(cct);
+    }
+  }
+  pending_inc.change_stretch_mode = true;
+  pending_inc.stretch_mode_enabled = false;
+  pending_inc.new_stretch_bucket_count = 0;
+  pending_inc.new_degraded_stretch_mode = 0;
+  pending_inc.new_stretch_mode_bucket = 0;
+  pending_inc.new_recovering_stretch_mode = 0;
+  *okay = true;
+  return;
 }
 
 void OSDMonitor::try_enable_stretch_mode_pools(stringstream& ss, bool *okay,
@@ -14870,7 +15270,10 @@ bool OSDMonitor::check_for_dead_crush_zones(const map<string,set<string>>& dead_
   bool really_down = false;
   for (auto dbi : dead_buckets) {
     const string& bucket_name = dbi.first;
-    ceph_assert(osdmap.crush->name_exists(bucket_name));
+    if (!osdmap.crush->name_exists(bucket_name)) {
+      dout(10) << "CRUSH bucket " << bucket_name << " does not exist" << dendl;
+      continue;
+    }
     int bucket_id = osdmap.crush->get_item_id(bucket_name);
     dout(20) << "Checking " << bucket_name << " id " << bucket_id
 	     << " to see if OSDs are also down" << dendl;

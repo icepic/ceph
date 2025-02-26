@@ -188,6 +188,7 @@ private:
   seastar::future<> _preboot(version_t oldest_osdmap, version_t newest_osdmap);
   seastar::future<> _send_boot();
   seastar::future<> _add_me_to_crush();
+  seastar::future<> _add_device_class();
 
   seastar::future<> osdmap_subscribe(version_t epoch, bool force_request);
 
@@ -208,6 +209,8 @@ private:
                                         Ref<MOSDRepOpReply> m);
   seastar::future<> handle_peering_op(crimson::net::ConnectionRef conn,
                                       Ref<MOSDPeeringOp> m);
+  seastar::future<> handle_pg_remove(crimson::net::ConnectionRef conn,
+				     Ref<MOSDPGRemove> m);
   seastar::future<> handle_recovery_subreq(crimson::net::ConnectionRef conn,
                                            Ref<MOSDFastDispatchOp> m);
   seastar::future<> handle_scrub_command(crimson::net::ConnectionRef conn,
@@ -231,8 +234,14 @@ private:
     crimson::net::ConnectionRef conn,
     Ref<MOSDPGUpdateLogMissingReply> m);
 
+  std::vector<DaemonHealthMetric> get_health_metrics();
+
+  seastar::future<> set_perf_queries(const ConfigPayload &config_payload);
+  seastar::future<MetricPayload> get_perf_reports();
 private:
-  crimson::common::Gated gate;
+  crimson::common::gate_per_shard gate;
+
+  ceph_release_t last_require_osd_release{ceph_release_t::unknown};
 
   seastar::promise<> stop_acked;
   void got_stop_ack() {
@@ -247,6 +256,10 @@ private:
 
 public:
   seastar::future<> send_beacon();
+  seastar::future<double> run_bench(int64_t count,
+    int64_t bsize,
+    int64_t osize,
+    int64_t onum);
 
 private:
   LogClient log_client;

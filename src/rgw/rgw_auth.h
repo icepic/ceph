@@ -105,7 +105,8 @@ inline std::ostream& operator<<(std::ostream& out,
 auto transform_old_authinfo(const DoutPrefixProvider* dpp,
                             optional_yield y,
                             sal::Driver* driver,
-                            sal::User* user)
+                            sal::User* user,
+                            std::vector<IAM::Policy>* policies_ = nullptr)
   -> tl::expected<std::unique_ptr<Identity>, int>;
 
 // Load the user account and all user/group policies. May throw
@@ -139,7 +140,7 @@ public:
    *
    * XXX: be aware that the "account" term refers to rgw_user. The naming
    * is legacy. */
-  virtual void load_acct_info(const DoutPrefixProvider* dpp, RGWUserInfo& user_info) const = 0; /* out */
+  virtual auto load_acct_info(const DoutPrefixProvider* dpp) const -> std::unique_ptr<rgw::sal::User> = 0; /* out */
 
   /* Apply any changes to request state. This method will be most useful for
    * TempURL of Swift API. */
@@ -484,7 +485,7 @@ public:
 
   bool is_identity(const Principal& p) const override;
 
-  void load_acct_info(const DoutPrefixProvider* dpp, RGWUserInfo& user_info) const override;
+  auto load_acct_info(const DoutPrefixProvider* dpp) const -> std::unique_ptr<rgw::sal::User> override;
 
   uint32_t get_identity_type() const override {
     return TYPE_WEB;
@@ -549,7 +550,7 @@ public:
     return ImplicitTenantValue(saved);
   }
 private:
-  const char** get_tracked_conf_keys() const override;
+  std::vector<std::string> get_tracked_keys() const noexcept override;
   void handle_conf_change(const ConfigProxy& conf,
     const std::set <std::string> &changed) override;
 };
@@ -621,6 +622,9 @@ protected:
   const rgw::auth::ImplicitTenants& implicit_tenant_context;
   const rgw::auth::ImplicitTenants::implicit_tenant_flag_bits implicit_tenant_bit;
 
+  // AuthInfo::acct_user updated with implicit tenant if necessary
+  mutable rgw_user owner_acct_user;
+
   // account and policies are loaded by load_acct_info()
   mutable std::optional<RGWAccountInfo> account;
   mutable std::vector<IAM::Policy> policies;
@@ -653,14 +657,14 @@ public:
 
   uint32_t get_perm_mask() const override { return info.perm_mask; }
   void to_str(std::ostream& out) const override;
-  void load_acct_info(const DoutPrefixProvider* dpp, RGWUserInfo& user_info) const override; /* out */
+  auto load_acct_info(const DoutPrefixProvider* dpp) const -> std::unique_ptr<rgw::sal::User> override; /* out */
   void modify_request_state(const DoutPrefixProvider* dpp, req_state* s) const override;
   void write_ops_log_entry(rgw_log_entry& entry) const override;
   uint32_t get_identity_type() const override { return info.acct_type; }
   std::string get_acct_name() const override { return info.acct_name; }
   std::string get_subuser() const override { return {}; }
   const std::string& get_tenant() const override {
-    return info.acct_user.tenant;
+    return owner_acct_user.tenant;
   }
   const std::optional<RGWAccountInfo>& get_account() const override {
     return account;
@@ -680,7 +684,7 @@ public:
 
 
 /* rgw::auth::LocalApplier targets those auth engines that base on the data
- * enclosed in the RGWUserInfo control structure. As a side effect of doing
+ * enclosed in the rgw::sal::User->RGWUserInfo control structure. As a side effect of doing
  * the authentication process, they must have it loaded. Leveraging this is
  * a way to avoid unnecessary calls to underlying RADOS store. */
 class LocalApplier : public IdentityApplier {
@@ -688,6 +692,7 @@ class LocalApplier : public IdentityApplier {
 
 protected:
   const RGWUserInfo user_info;
+  mutable std::unique_ptr<rgw::sal::User> user;
   const std::optional<RGWAccountInfo> account;
   const std::vector<IAM::Policy> policies;
   const std::string subuser;
@@ -702,19 +707,12 @@ public:
   static const std::string NO_ACCESS_KEY;
 
   LocalApplier(CephContext* const cct,
-               const RGWUserInfo& user_info,
+               std::unique_ptr<rgw::sal::User> user,
                std::optional<RGWAccountInfo> account,
                std::vector<IAM::Policy> policies,
                std::string subuser,
                const std::optional<uint32_t>& perm_mask,
-               const std::string access_key_id)
-    : user_info(user_info),
-      account(std::move(account)),
-      policies(std::move(policies)),
-      subuser(std::move(subuser)),
-      perm_mask(perm_mask.value_or(RGW_PERM_INVALID)),
-      access_key_id(access_key_id) {
-  }
+               const std::string access_key_id);
 
   ACLOwner get_aclowner() const override;
   uint32_t get_perms_from_aclspec(const DoutPrefixProvider* dpp, const aclspec_t& aclspec) const override;
@@ -729,7 +727,7 @@ public:
     }
   }
   void to_str(std::ostream& out) const override;
-  void load_acct_info(const DoutPrefixProvider* dpp, RGWUserInfo& user_info) const override; /* out */
+  auto load_acct_info(const DoutPrefixProvider* dpp) const -> std::unique_ptr<rgw::sal::User> override; /* out */
   void modify_request_state(const DoutPrefixProvider* dpp, req_state* s) const override;
   uint32_t get_identity_type() const override { return user_info.type; }
   std::string get_acct_name() const override { return {}; }
@@ -747,7 +745,7 @@ public:
     virtual ~Factory() {}
     virtual aplptr_t create_apl_local(CephContext* cct,
                                       const req_state* s,
-                                      const RGWUserInfo& user_info,
+                                      std::unique_ptr<rgw::sal::User> user,
                                       std::optional<RGWAccountInfo> account,
                                       std::vector<IAM::Policy> policies,
                                       const std::string& subuser,
@@ -776,15 +774,20 @@ public:
     std::vector<std::pair<std::string, std::string>> principal_tags;
   };
 protected:
+  CephContext* const cct;
+  rgw::sal::Driver* driver;
   Role role;
   TokenAttrs token_attrs;
 
 public:
 
   RoleApplier(CephContext* const cct,
+               rgw::sal::Driver* driver,
                const Role& role,
                const TokenAttrs& token_attrs)
-    : role(role),
+    : cct(cct),
+      driver(driver),
+      role(role),
       token_attrs(token_attrs) {}
 
   ACLOwner get_aclowner() const override;
@@ -800,7 +803,7 @@ public:
     return RGW_PERM_NONE; 
   }
   void to_str(std::ostream& out) const override;
-  void load_acct_info(const DoutPrefixProvider* dpp, RGWUserInfo& user_info) const override; /* out */
+  auto load_acct_info(const DoutPrefixProvider* dpp) const -> std::unique_ptr<rgw::sal::User> override; /* out */
   uint32_t get_identity_type() const override { return TYPE_ROLE; }
   std::string get_acct_name() const override { return {}; }
   std::string get_subuser() const override { return {}; }

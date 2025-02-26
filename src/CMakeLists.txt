@@ -16,6 +16,7 @@ endif()
 set(bindir ${CMAKE_INSTALL_FULL_BINDIR})
 set(sbindir ${CMAKE_INSTALL_FULL_SBINDIR})
 set(libdir ${CMAKE_INSTALL_FULL_LIBDIR})
+set(includedir ${CMAKE_INSTALL_FULL_INCLUDEDIR})
 set(sysconfdir ${CMAKE_INSTALL_FULL_SYSCONFDIR})
 set(libexecdir ${CMAKE_INSTALL_FULL_LIBEXECDIR})
 set(pkgdatadir ${CMAKE_INSTALL_FULL_DATADIR})
@@ -30,6 +31,12 @@ configure_file(ceph-post-file.in
 
 configure_file(ceph-crash.in
   ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ceph-crash @ONLY)
+
+if(WITH_LIBCEPHFS)
+  configure_file(
+    ${CMAKE_SOURCE_DIR}/src/cephfs.pc.in
+    ${CMAKE_BINARY_DIR}/src/cephfs.pc @ONLY)
+endif(WITH_LIBCEPHFS)
 
 # the src/.git_version file may be written out by make-dist; otherwise
 # we pull the git version from .git
@@ -69,6 +76,10 @@ configure_file(${CMAKE_SOURCE_DIR}/src/ceph.in
 configure_file(
   ${CMAKE_SOURCE_DIR}/src/ceph_ver.h.in.cmake
   ${CMAKE_BINARY_DIR}/src/include/ceph_ver.h
+  @ONLY)
+configure_file(
+  ${CMAKE_SOURCE_DIR}/src/ceph_release.h.in.cmake
+  ${CMAKE_BINARY_DIR}/src/include/ceph_release.h
   @ONLY)
 
 add_definitions(
@@ -140,8 +151,8 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL GNU)
     endif()
   endif()
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL Clang)
-  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12) # require >= clang-12
-    message(FATAL_ERROR "C++20 support requires a minimum Clang version of 12.")
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
+    message(FATAL_ERROR "C++20 support requires a minimum Clang version of 16.")
   endif()
   string(APPEND CMAKE_EXE_LINKER_FLAGS " ${CMAKE_EXE_EXPORTS_C_FLAG}")
   string(APPEND CMAKE_LINKER_FLAGS " -rdynamic -export-dynamic ${CMAKE_EXE_EXPORTS_C_FLAG}")
@@ -158,6 +169,10 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL Clang)
     -Wno-missing-braces
     -Wno-parentheses
     -Wno-deprecated-register)
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 18)
+    add_compile_options(
+    -Wno-vla-cxx-extension)
+  endif()
   if(FREEBSD)
     # Need to use the GNU binutils linker to get versioning right.
     string(APPEND CMAKE_EXE_LINKER_FLAGS " -fuse-ld=/usr/local/bin/ld -Wno-unused-command-line-argument")
@@ -195,6 +210,9 @@ CHECK_C_COMPILER_FLAG("-D_GLIBCXX_ASSERTIONS" HAS_GLIBCXX_ASSERTIONS)
 if(HAS_GLIBCXX_ASSERTIONS AND CMAKE_BUILD_TYPE STREQUAL Debug)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-D_GLIBCXX_ASSERTIONS>)
 endif()
+
+# add BLAKE3 before we clobber CMAKE_ASM_COMPILER
+add_subdirectory(BLAKE3/c EXCLUDE_FROM_ALL)
 
 include(SIMDExt)
 if(HAVE_INTEL)
@@ -263,15 +281,18 @@ if(LINUX OR APPLE)
   list(APPEND EXTRALIBS ${LIB_RESOLV})
 endif()
 
+option(ENABLE_COVERAGE "Coverage is enabled" OFF)
 if(${ENABLE_COVERAGE})
   find_program(HAVE_GCOV gcov)
   if(NOT HAVE_GCOV)
     message(FATAL_ERROR "Coverage Enabled but gcov Not Found")
   endif()
   add_compile_options(
-    -fprofile-arcs
-    -ftest-coverage
+    --coverage
     -O0)
+  add_link_options(
+    --coverage
+  )
   list(APPEND EXTRALIBS gcov)
 endif(${ENABLE_COVERAGE})
 
@@ -346,6 +367,7 @@ else()
   message(STATUS "Building fmt as submodule")
   set(old_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
   set(BUILD_SHARED_LIBS FALSE)
+  set(FMT_INSTALL OFF)
   add_subdirectory(fmt)
   set(BUILD_SHARED_LIBS ${old_BUILD_SHARED_LIBS})
   unset(old_BUILD_SHARED_LIBS)
@@ -377,7 +399,7 @@ if(WITH_SEASTAR)
   set(Seastar_API_LEVEL "6" CACHE STRING "" FORCE)
   set(Seastar_HWLOC OFF CACHE BOOL "" FORCE)
   set(Seastar_IO_URING OFF CACHE BOOL "" FORCE)
-  set(Seastar_STD_OPTIONAL_VARIANT_STRINGVIEW ON CACHE BOOL "" FORCE)
+  set(Seastar_DEPRECATED_OSTREAM_FORMATTERS OFF CACHE BOOL "" FORCE)
   if(Seastar_DPDK)
     find_package(dpdk QUIET)
     if(NOT DPDK_FOUND)
@@ -815,10 +837,12 @@ if(WITH_LIBCEPHFS)
   target_link_libraries(cephfs PRIVATE client ceph-common
     ${CRYPTO_LIBS} ${EXTRALIBS})
   if(ENABLE_SHARED)
+    set(libcephfs_version 2.0.0)
+    set(libcephfs_soversion 2)
     set_target_properties(cephfs PROPERTIES
       OUTPUT_NAME cephfs
-      VERSION 2.0.0
-      SOVERSION 2)
+      VERSION ${libcephfs_version}
+      SOVERSION ${libcephfs_soversion})
     if(NOT APPLE AND NOT
         (WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL Clang))
       foreach(name ceph-common client osdc)
@@ -831,6 +855,9 @@ if(WITH_LIBCEPHFS)
   install(DIRECTORY
     "include/cephfs"
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+  install(FILES
+    ${CMAKE_BINARY_DIR}/src/cephfs.pc
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
   set(ceph_syn_srcs
     ceph_syn.cc
     client/SyntheticClient.cc)
@@ -840,6 +867,7 @@ if(WITH_LIBCEPHFS)
   if(LINUX)
     add_subdirectory(mount)
   endif()
+  add_subdirectory(libcephfs_proxy)
 endif(WITH_LIBCEPHFS)
 
 if(WITH_LIBCEPHSQLITE)
@@ -868,6 +896,118 @@ if(WITH_FUSE)
   install(TARGETS ceph-fuse DESTINATION bin)
   install(PROGRAMS mount.fuse.ceph DESTINATION ${CMAKE_INSTALL_SBINDIR})
 endif(WITH_FUSE)
+
+# NVMEOF GATEWAY MONITOR CLIENT
+# Supported on RPM-based platforms only, depends on grpc devel libraries/tools
+if(EXISTS "/etc/redhat-release" OR EXISTS "/etc/fedora-release")
+  option(WITH_NVMEOF_GATEWAY_MONITOR_CLIENT "build nvmeof gateway monitor client" ON)
+else()
+  option(WITH_NVMEOF_GATEWAY_MONITOR_CLIENT "build nvmeof gateway monitor client" OFF)
+endif()
+
+if(WITH_NVMEOF_GATEWAY_MONITOR_CLIENT)
+
+  # Find Protobuf installation
+  # Looks for protobuf-config.cmake file installed by Protobuf's cmake installation.
+  option(protobuf_MODULE_COMPATIBLE TRUE)
+  find_package(Protobuf REQUIRED)
+
+  set(_REFLECTION grpc++_reflection)
+  if(CMAKE_CROSSCOMPILING)
+    find_program(_PROTOBUF_PROTOC protoc)
+  else()
+    set(_PROTOBUF_PROTOC $<TARGET_FILE:protobuf::protoc>)
+  endif()
+
+  # Find gRPC installation
+  # Looks for gRPCConfig.cmake file installed by gRPC's cmake installation.
+  find_package(gRPC CONFIG REQUIRED)
+  message(STATUS "Using gRPC ${gRPC_VERSION}")
+  set(_GRPC_GRPCPP gRPC::grpc++)
+  if(CMAKE_CROSSCOMPILING)
+    find_program(_GRPC_CPP_PLUGIN_EXECUTABLE grpc_cpp_plugin)
+  else()
+    set(_GRPC_CPP_PLUGIN_EXECUTABLE $<TARGET_FILE:gRPC::grpc_cpp_plugin>)
+  endif()
+
+  # Gateway Proto file
+  get_filename_component(nvmeof_gateway_proto "nvmeof/gateway/control/proto/gateway.proto" ABSOLUTE)
+  get_filename_component(nvmeof_gateway_proto_path "${nvmeof_gateway_proto}" PATH)
+
+  # Generated sources
+  set(nvmeof_gateway_proto_srcs "${CMAKE_CURRENT_BINARY_DIR}/gateway.pb.cc")
+  set(nvmeof_gateway_proto_hdrs "${CMAKE_CURRENT_BINARY_DIR}/gateway.pb.h")
+  set(nvmeof_gateway_grpc_srcs "${CMAKE_CURRENT_BINARY_DIR}/gateway.grpc.pb.cc")
+  set(nvmeof_gateway_grpc_hdrs "${CMAKE_CURRENT_BINARY_DIR}/gateway.grpc.pb.h")
+
+  add_custom_command(
+        OUTPUT "${nvmeof_gateway_proto_srcs}" "${nvmeof_gateway_proto_hdrs}" "${nvmeof_gateway_grpc_srcs}" "${nvmeof_gateway_grpc_hdrs}"
+        COMMAND ${_PROTOBUF_PROTOC}
+        ARGS --grpc_out "${CMAKE_CURRENT_BINARY_DIR}"
+          --cpp_out "${CMAKE_CURRENT_BINARY_DIR}"
+          -I "${nvmeof_gateway_proto_path}"
+          --experimental_allow_proto3_optional
+          --plugin=protoc-gen-grpc="${_GRPC_CPP_PLUGIN_EXECUTABLE}"
+          "${nvmeof_gateway_proto}"
+        DEPENDS "${nvmeof_gateway_proto}")
+
+
+  # Monitor Proto file
+  get_filename_component(nvmeof_monitor_proto "nvmeof/gateway/control/proto/monitor.proto" ABSOLUTE)
+  get_filename_component(nvmeof_monitor_proto_path "${nvmeof_monitor_proto}" PATH)
+
+  # Generated sources
+  set(nvmeof_monitor_proto_srcs "${CMAKE_CURRENT_BINARY_DIR}/monitor.pb.cc")
+  set(nvmeof_monitor_proto_hdrs "${CMAKE_CURRENT_BINARY_DIR}/monitor.pb.h")
+  set(nvmeof_monitor_grpc_srcs "${CMAKE_CURRENT_BINARY_DIR}/monitor.grpc.pb.cc")
+  set(nvmeof_monitor_grpc_hdrs "${CMAKE_CURRENT_BINARY_DIR}/monitor.grpc.pb.h")
+
+  add_custom_command(
+        OUTPUT "${nvmeof_monitor_proto_srcs}" "${nvmeof_monitor_proto_hdrs}" "${nvmeof_monitor_grpc_srcs}" "${nvmeof_monitor_grpc_hdrs}"
+        COMMAND ${_PROTOBUF_PROTOC}
+        ARGS --grpc_out "${CMAKE_CURRENT_BINARY_DIR}"
+          --cpp_out "${CMAKE_CURRENT_BINARY_DIR}"
+          -I "${nvmeof_monitor_proto_path}"
+          --experimental_allow_proto3_optional
+          --plugin=protoc-gen-grpc="${_GRPC_CPP_PLUGIN_EXECUTABLE}"
+          "${nvmeof_monitor_proto}"
+        DEPENDS "${nvmeof_monitor_proto}")
+
+  # Include generated *.pb.h files
+  include_directories("${CMAKE_CURRENT_BINARY_DIR}")
+
+  set(ceph_nvmeof_monitor_client_srcs
+    ${nvmeof_gateway_proto_srcs}
+    ${nvmeof_gateway_proto_hdrs}
+    ${nvmeof_gateway_grpc_srcs}
+    ${nvmeof_gateway_grpc_hdrs}
+    ${nvmeof_monitor_proto_srcs}
+    ${nvmeof_monitor_proto_hdrs}
+    ${nvmeof_monitor_grpc_srcs}
+    ${nvmeof_monitor_grpc_hdrs}
+    ceph_nvmeof_monitor_client.cc
+    nvmeof/NVMeofGwClient.cc
+    nvmeof/NVMeofGwMonitorGroupClient.cc
+    nvmeof/NVMeofGwMonitorClient.cc)
+  add_executable(ceph-nvmeof-monitor-client ${ceph_nvmeof_monitor_client_srcs})
+  add_dependencies(ceph-nvmeof-monitor-client ceph-common)
+  # absl is installed as grpc build dependency on RPM based systems
+  # Also isolate this flag to specific targets which needs this package
+  if(EXISTS "/etc/redhat-release" OR EXISTS "/etc/fedora-release")
+    target_compile_definitions(ceph-nvmeof-monitor-client PRIVATE HAVE_ABSEIL)
+    target_compile_definitions(ceph-mon PRIVATE HAVE_ABSEIL)
+  endif()
+  target_link_libraries(ceph-nvmeof-monitor-client
+    client
+    mon
+    global-static
+    ceph-common
+    ${_REFLECTION}
+    ${_GRPC_GRPCPP}
+    )
+  install(TARGETS ceph-nvmeof-monitor-client DESTINATION bin)
+endif()
+# END OF NVMEOF GATEWAY MONITOR CLIENT
 
 if(WITH_DOKAN)
   add_subdirectory(dokan)

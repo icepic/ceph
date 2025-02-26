@@ -168,7 +168,7 @@ add_executable(ceph_test_mutate
 target_link_libraries(ceph_test_mutate global librados ${BLKID_LIBRARIES}
   ${CMAKE_DL_LIBS})
 
-if(NOT WIN32)
+if(WITH_BLUESTORE AND NOT WIN32)
 # test_trans
 add_executable(test_trans
   test_trans.cc
@@ -591,6 +591,7 @@ if(NOT WIN32)
   ceph_snappy
   cls_lock
   ceph_test_objectstore
+  ceph_test_bluefs
   ceph_erasure_code_non_regression
   cython_modules
   crushtool
@@ -974,6 +975,12 @@ add_executable(unittest_texttable
 add_ceph_unittest(unittest_texttable)
 target_link_libraries(unittest_texttable ceph-common)
 
+# unittest_not_before_queue
+add_executable(unittest_not_before_queue
+  test_not_before_queue.cc)
+add_ceph_unittest(unittest_not_before_queue)
+target_link_libraries(unittest_not_before_queue ceph-common)
+
 if(NOT WIN32)
 # unittest_on_exit
 add_executable(unittest_on_exit
@@ -1008,3 +1015,11 @@ add_ceph_unittest(unittest_weighted_shuffle)
 add_executable(unittest_intarith test_intarith.cc)
 add_ceph_unittest(unittest_intarith)
 #make check ends here
+
+# test_nvmeof_mon_encoding
+add_executable(test_nvmeof_mon_encoding
+  test_nvmeof_mon_encoding.cc
+  )
+target_link_libraries(test_nvmeof_mon_encoding
+  mon ceph-common global-static
+  )

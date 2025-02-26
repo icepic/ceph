@@ -28,6 +28,7 @@ from teuthology.config import config as teuth_config
 from teuthology.exceptions import ConfigError, CommandFailedError
 from textwrap import dedent
 from tasks.cephfs.filesystem import MDSCluster, Filesystem
+from tasks.daemonwatchdog import DaemonWatchdog
 from tasks.util import chacra
 
 # these items we use from ceph.py should probably eventually move elsewhere
@@ -208,7 +209,9 @@ def normalize_hostnames(ctx):
 def download_cephadm(ctx, config, ref):
     cluster_name = config['cluster']
 
-    if 'cephadm_binary_url' in config:
+    if 'cephadm_from_container' in config:
+        _fetch_cephadm_from_container(ctx, config)
+    elif 'cephadm_binary_url' in config:
         url = config['cephadm_binary_url']
         _download_cephadm(ctx, url)
     elif config.get('cephadm_mode') != 'cephadm-package':
@@ -229,6 +232,36 @@ def download_cephadm(ctx, config, ref):
         _rm_cluster(ctx, cluster_name)
         if config.get('cephadm_mode') == 'root':
             _rm_cephadm(ctx)
+
+
+def _fetch_cephadm_from_container(ctx, config):
+    image = config['image']
+    cengine = 'podman'
+    try:
+        log.info("Testing if podman is available")
+        ctx.cluster.run(args=['sudo', cengine, '--help'])
+    except CommandFailedError:
+        log.info("Failed to find podman. Using docker")
+        cengine = 'docker'
+
+    ctx.cluster.run(args=['sudo', cengine, 'pull', image])
+    ctx.cluster.run(args=[
+        'sudo', cengine, 'run', '--rm', '--entrypoint=cat', image, '/usr/sbin/cephadm',
+        run.Raw('>'),
+        ctx.cephadm,
+    ])
+
+    # sanity-check the resulting file and set executable bit
+    cephadm_file_size = '$(stat -c%s {})'.format(ctx.cephadm)
+    ctx.cluster.run(
+        args=[
+            'test', '-s', ctx.cephadm,
+            run.Raw('&&'),
+            'test', run.Raw(cephadm_file_size), "-gt", run.Raw('1000'),
+            run.Raw('&&'),
+            'chmod', '+x', ctx.cephadm,
+        ],
+    )
 
 
 def _fetch_cephadm_from_rpm(ctx):
@@ -442,12 +475,16 @@ def ceph_log(ctx, config):
                 run.Raw('|'), 'head', '-n', '1',
             ])
             r = ctx.ceph[cluster_name].bootstrap_remote.run(
-                stdout=StringIO(),
+                stdout=BytesIO(),
                 args=args,
+                stderr=StringIO(),
             )
-            stdout = r.stdout.getvalue()
-            if stdout != '':
+            stdout = r.stdout.getvalue().decode()
+            if stdout:
                 return stdout
+            stderr = r.stderr.getvalue()
+            if stderr:
+                return stderr
             return None
 
         # NOTE: technically the first and third arg to first_in_ceph_log
@@ -845,6 +882,15 @@ def ceph_bootstrap(ctx, config):
         yield
 
     finally:
+        log.info('Disabling cephadm mgr module')
+        _shell(
+            ctx,
+            cluster_name,
+            bootstrap_remote,
+            ['ceph', 'mgr', 'module', 'disable', 'cephadm'],
+            check_status=False  # can fail if bootstrap failed and mask errors
+        )
+
         log.info('Cleaning up testdir ceph.* files...')
         ctx.cluster.run(args=[
             'rm', '-f',
@@ -880,11 +926,14 @@ def ceph_bootstrap(ctx, config):
         )
 
         # clean up /etc/ceph
-        ctx.cluster.run(args=[
-            'sudo', 'rm', '-f',
-            '/etc/ceph/{}.conf'.format(cluster_name),
-            '/etc/ceph/{}.client.admin.keyring'.format(cluster_name),
-        ])
+        ctx.cluster.run(
+            args=[
+                'sudo', 'rm', '-f',
+                '/etc/ceph/{}.conf'.format(cluster_name),
+                '/etc/ceph/{}.client.admin.keyring'.format(cluster_name),
+            ],
+            check_status=False,  # rm-cluster above should have cleaned these up
+        )
 
 
 @contextlib.contextmanager
@@ -1085,8 +1134,18 @@ def ceph_osds(ctx, config):
                 short_dev = dev
             log.info('Deploying %s on %s with %s...' % (
                 osd, remote.shortname, dev))
-            _shell(ctx, cluster_name, remote, [
-                'ceph-volume', 'lvm', 'zap', dev])
+            remote.run(
+                args=[
+                    'sudo',
+                    ctx.cephadm,
+                    '--image', ctx.ceph[cluster_name].image,
+                    'ceph-volume',
+                    '-c', '/etc/ceph/{}.conf'.format(cluster_name),
+                    '-k', '/etc/ceph/{}.client.admin.keyring'.format(cluster_name),
+                    '--fsid', ctx.ceph[cluster_name].fsid,
+                    '--', 'lvm', 'zap', dev
+                ]
+            )
             add_osd_args = ['ceph', 'orch', 'daemon', 'add', 'osd',
                             remote.shortname + ':' + short_dev]
             osd_method = config.get('osd_method')
@@ -1385,6 +1444,15 @@ def ceph_clients(ctx, config):
             remote.sudo_write_file(client_keyring, keyring, mode='0644')
     yield
 
+@contextlib.contextmanager
+def watchdog_setup(ctx, config):
+    if 'watchdog_setup' in config: 
+        ctx.ceph[config['cluster']].thrashers = []
+        ctx.ceph[config['cluster']].watchdog = DaemonWatchdog(ctx, config, ctx.ceph[config['cluster']].thrashers)
+        ctx.ceph[config['cluster']].watchdog.start()
+    else:
+        ctx.ceph[config['cluster']].watchdog = None 
+    yield
 
 @contextlib.contextmanager
 def ceph_initial():
@@ -1425,10 +1493,11 @@ def stop(ctx, config):
         cluster, type_, id_ = teuthology.split_role(role)
         ctx.daemons.get_daemon(type_, id_, cluster).stop()
         clusters.add(cluster)
-
-#    for cluster in clusters:
-#        ctx.ceph[cluster].watchdog.stop()
-#        ctx.ceph[cluster].watchdog.join()
+    
+    if ctx.ceph[cluster].watchdog:
+        for cluster in clusters:
+            ctx.ceph[cluster].watchdog.stop()
+            ctx.ceph[cluster].watchdog.join()
 
     yield
 
@@ -1748,25 +1817,77 @@ def crush_setup(ctx, config):
 
 
 @contextlib.contextmanager
+def module_setup(ctx, config):
+    cluster_name = config['cluster']
+    remote = ctx.ceph[cluster_name].bootstrap_remote
+
+    modules = config.get('mgr-modules', [])
+    for m in modules:
+        m = str(m)
+        cmd = [
+           'sudo',
+           'ceph',
+           '--cluster',
+           cluster_name,
+           'mgr',
+           'module',
+           'enable',
+           m,
+        ]
+        log.info("enabling module %s", m)
+        _shell(ctx, cluster_name, remote, args=cmd)
+    yield
+
+
+@contextlib.contextmanager
+def conf_setup(ctx, config):
+    cluster_name = config['cluster']
+    remote = ctx.ceph[cluster_name].bootstrap_remote
+
+    configs = config.get('cluster-conf', {})
+    procs = []
+    for section, confs in configs.items():
+        section = str(section)
+        for k, v in confs.items():
+            k = str(k).replace(' ', '_') # pre-pacific compatibility
+            v = str(v)
+            cmd = [
+                'ceph',
+                'config',
+                'set',
+                section,
+                k,
+                v,
+            ]
+            log.info("setting config [%s] %s = %s", section, k, v)
+            procs.append(_shell(ctx, cluster_name, remote, args=cmd, wait=False))
+    log.debug("set %d configs", len(procs))
+    for p in procs:
+        log.debug("waiting for %s", p)
+        p.wait()
+    cmd = [
+        'ceph',
+        'config',
+        'dump',
+    ]
+    _shell(ctx, cluster_name, remote, args=cmd)
+    yield
+
+@contextlib.contextmanager
+def conf_epoch(ctx, config):
+    cm = ctx.managers[config['cluster']]
+    cm.save_conf_epoch()
+    yield
+
+@contextlib.contextmanager
 def create_rbd_pool(ctx, config):
     if config.get('create_rbd_pool', False):
       cluster_name = config['cluster']
-      log.info('Waiting for OSDs to come up')
-      teuthology.wait_until_osds_up(
-          ctx,
-          cluster=ctx.cluster,
-          remote=ctx.ceph[cluster_name].bootstrap_remote,
-          ceph_cluster=cluster_name,
-      )
       log.info('Creating RBD pool')
       _shell(ctx, cluster_name, ctx.ceph[cluster_name].bootstrap_remote,
-          args=['sudo', 'ceph', '--cluster', cluster_name,
-                'osd', 'pool', 'create', 'rbd', '8'])
+          args=['ceph', 'osd', 'pool', 'create', 'rbd', '8'])
       _shell(ctx, cluster_name, ctx.ceph[cluster_name].bootstrap_remote,
-          args=['sudo', 'ceph', '--cluster', cluster_name,
-                'osd', 'pool', 'application', 'enable',
-                'rbd', 'rbd', '--yes-i-really-mean-it'
-          ])
+          args=['rbd', 'pool', 'init', 'rbd'])
     yield
 
 
@@ -2175,6 +2296,7 @@ def task(ctx, config):
 
     :param ctx: the argparse.Namespace object
     :param config: the config dict
+    :param watchdog_setup: start DaemonWatchdog to watch daemons for failures
     """
     if config is None:
         config = {}
@@ -2249,7 +2371,9 @@ def task(ctx, config):
             lambda: crush_setup(ctx=ctx, config=config),
             lambda: ceph_mons(ctx=ctx, config=config),
             lambda: distribute_config_and_admin_keyring(ctx=ctx, config=config),
+            lambda: module_setup(ctx=ctx, config=config),
             lambda: ceph_mgrs(ctx=ctx, config=config),
+            lambda: conf_setup(ctx=ctx, config=config),
             lambda: ceph_osds(ctx=ctx, config=config),
             lambda: ceph_mdss(ctx=ctx, config=config),
             lambda: cephfs_setup(ctx=ctx, config=config),
@@ -2261,6 +2385,8 @@ def task(ctx, config):
             lambda: ceph_monitoring('grafana', ctx=ctx, config=config),
             lambda: ceph_clients(ctx=ctx, config=config),
             lambda: create_rbd_pool(ctx=ctx, config=config),
+            lambda: conf_epoch(ctx=ctx, config=config),
+            lambda: watchdog_setup(ctx=ctx, config=config),
     ):
         try:
             if config.get('wait-for-healthy', True):

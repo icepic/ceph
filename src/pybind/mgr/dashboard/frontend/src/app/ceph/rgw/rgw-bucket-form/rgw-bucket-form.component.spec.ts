@@ -18,6 +18,7 @@ import { configureTestBed, FormHelper } from '~/testing/unit-test-helper';
 import { RgwBucketMfaDelete } from '../models/rgw-bucket-mfa-delete';
 import { RgwBucketVersioning } from '../models/rgw-bucket-versioning';
 import { RgwBucketFormComponent } from './rgw-bucket-form.component';
+import { RgwRateLimitComponent } from '../rgw-rate-limit/rgw-rate-limit.component';
 
 describe('RgwBucketFormComponent', () => {
   let component: RgwBucketFormComponent;
@@ -29,7 +30,7 @@ describe('RgwBucketFormComponent', () => {
   let formHelper: FormHelper;
 
   configureTestBed({
-    declarations: [RgwBucketFormComponent],
+    declarations: [RgwBucketFormComponent, RgwRateLimitComponent],
     imports: [
       HttpClientTestingModule,
       ReactiveFormsModule,
@@ -153,16 +154,19 @@ describe('RgwBucketFormComponent', () => {
         'mfa-delete': mfaDeleteChecked
       });
       fixture.detectChanges();
-
-      const mfaTokenSerial = fixture.debugElement.nativeElement.querySelector('#mfa-token-serial');
-      const mfaTokenPin = fixture.debugElement.nativeElement.querySelector('#mfa-token-pin');
-      if (expectedVisibility) {
-        expect(mfaTokenSerial).toBeTruthy();
-        expect(mfaTokenPin).toBeTruthy();
-      } else {
-        expect(mfaTokenSerial).toBeFalsy();
-        expect(mfaTokenPin).toBeFalsy();
-      }
+      fixture.whenStable().then(() => {
+        const mfaTokenSerial = fixture.debugElement.nativeElement.querySelector(
+          '#mfa-token-serial'
+        );
+        const mfaTokenPin = fixture.debugElement.nativeElement.querySelector('#mfa-token-pin');
+        if (expectedVisibility) {
+          expect(mfaTokenSerial).toBeTruthy();
+          expect(mfaTokenPin).toBeTruthy();
+        } else {
+          expect(mfaTokenSerial).toBeFalsy();
+          expect(mfaTokenPin).toBeFalsy();
+        }
+      });
     };
 
     it('inputs should be visible when required', () => {
@@ -306,5 +310,27 @@ describe('RgwBucketFormComponent', () => {
     it('should have valid values [2]', () => {
       expectValidLockInputs(false, 'Compliance', '2');
     });
+  });
+
+  describe('bucket replication', () => {
+    it('should validate replication input', () => {
+      formHelper.setValue('replication', true);
+      fixture.detectChanges();
+      formHelper.expectValid('replication');
+    });
+  });
+
+  it('should call setTag', () => {
+    let tag = { key: 'test', value: 'test' };
+    // jest.spyOn(component.bucketForm,'markAsDirty')
+    component['setTag'](tag, 0);
+    expect(component.tags[0]).toEqual(tag);
+    expect(component.dirtyTags).toEqual(true);
+  });
+  it('should call deleteTag', () => {
+    component.tags = [{ key: 'test', value: 'test' }];
+    const updateValidationSpy = jest.spyOn(component.bucketForm, 'updateValueAndValidity');
+    component.deleteTag(0);
+    expect(updateValidationSpy).toHaveBeenCalled();
   });
 });

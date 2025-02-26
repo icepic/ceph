@@ -43,6 +43,8 @@
     bucket sync disable              disable bucket sync
     bucket sync enable               enable bucket sync
     bucket radoslist                 list rados objects backing bucket's objects
+    bucket logging flush             flush pending log records object of source bucket to the log bucket
+    bucket logging info              get info on bucket logging configuration on source bucket or list of sources in log bucket
     bi get                           retrieve bucket index object entries
     bi put                           store bucket index object entries
     bi list                          list raw bucket index entries
@@ -88,6 +90,7 @@
     realm rename                     rename a realm
     realm set                        set realm info (requires infile)
     realm default                    set realm as default
+    realm default rm                 clear the current default realm
     realm pull                       pull a realm and its current period
     zonegroup add                    add a zone to a zonegroup
     zonegroup create                 create a new zone group info
@@ -182,6 +185,8 @@
     reshard cancel                   cancel resharding a bucket
     reshard stale-instances list     list stale-instances from bucket resharding
     reshard stale-instances delete   cleanup stale-instances from bucket resharding
+    reshardlog list                  list bucket resharding log
+    reshardlog purge                 trim bucket resharding log
     sync error list                  list sync error
     sync error trim                  trim sync error
     mfa create                       create a new MFA TOTP token
@@ -194,6 +199,7 @@
     topic get                        get a bucket notifications topic
     topic rm                         remove a bucket notifications topic
     topic stats                      get a bucket notifications persistent topic stats (i.e. reservations, entries & size)
+    topic dump                       dump (in JSON format) all pending bucket notifications of a persistent topic
     script put                       upload a Lua script to a context
     script get                       get the Lua script of a context
     script rm                        remove the Lua scripts of a context
@@ -221,6 +227,7 @@
      --secret/--secret-key=<key>       specify secret key
      --gen-access-key                  generate random access key (for S3)
      --gen-secret                      generate random secret key
+     --generate-key                    create user with or without credentials
      --key-type=<type>                 key type, options are: swift, s3
      --key-active=<bool>               activate or deactivate a key
      --temp-url-key[-2]=<key>          temp url key

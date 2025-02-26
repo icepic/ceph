@@ -1,13 +1,21 @@
-import { CommonModule } from '@angular/common';
+import { CommonModule, TitleCasePipe } from '@angular/common';
 import { NgModule } from '@angular/core';
 import { FormsModule, ReactiveFormsModule } from '@angular/forms';
 import { RouterModule, Routes } from '@angular/router';
 
-import { NgbNavModule, NgbPopoverModule, NgbTooltipModule } from '@ng-bootstrap/ng-bootstrap';
-import { NgxPipeFunctionModule } from 'ngx-pipe-function';
+import {
+  NgbNavModule,
+  NgbPopoverModule,
+  NgbProgressbar,
+  NgbTooltipModule,
+  NgbTypeaheadModule
+} from '@ng-bootstrap/ng-bootstrap';
+import { PipesModule } from '~/app/shared/pipes/pipes.module';
 
 import { ActionLabels, URLVerbs } from '~/app/shared/constants/app.constants';
 import { CRUDTableComponent } from '~/app/shared/datatable/crud-table/crud-table.component';
+import { FeatureTogglesGuardService } from '~/app/shared/services/feature-toggles-guard.service';
+import { ModuleStatusGuardService } from '~/app/shared/services/module-status-guard.service';
 
 import { SharedModule } from '~/app/shared/shared.module';
 import { PerformanceCounterModule } from '../performance-counter/performance-counter.module';
@@ -26,7 +34,6 @@ import { RgwUserSubuserModalComponent } from './rgw-user-subuser-modal/rgw-user-
 import { RgwUserSwiftKeyModalComponent } from './rgw-user-swift-key-modal/rgw-user-swift-key-modal.component';
 import { RgwUserTabsComponent } from './rgw-user-tabs/rgw-user-tabs.component';
 import { RgwMultisiteDetailsComponent } from './rgw-multisite-details/rgw-multisite-details.component';
-import { TreeModule } from '@circlon/angular-tree-component';
 import { DataTableModule } from '~/app/shared/datatable/datatable.module';
 import { RgwMultisiteRealmFormComponent } from './rgw-multisite-realm-form/rgw-multisite-realm-form.component';
 import { RgwMultisiteZonegroupFormComponent } from './rgw-multisite-zonegroup-form/rgw-multisite-zonegroup-form.component';
@@ -45,22 +52,87 @@ import { RgwSyncPrimaryZoneComponent } from './rgw-sync-primary-zone/rgw-sync-pr
 import { RgwSyncMetadataInfoComponent } from './rgw-sync-metadata-info/rgw-sync-metadata-info.component';
 import { RgwSyncDataInfoComponent } from './rgw-sync-data-info/rgw-sync-data-info.component';
 import { BucketTagModalComponent } from './bucket-tag-modal/bucket-tag-modal.component';
+import { NfsListComponent } from '../nfs/nfs-list/nfs-list.component';
+import { NfsFormComponent } from '../nfs/nfs-form/nfs-form.component';
+import { RgwMultisiteSyncPolicyComponent } from './rgw-multisite-sync-policy/rgw-multisite-sync-policy.component';
+import { RgwMultisiteSyncPolicyFormComponent } from './rgw-multisite-sync-policy-form/rgw-multisite-sync-policy-form.component';
+import { RgwConfigurationPageComponent } from './rgw-configuration-page/rgw-configuration-page.component';
+import { RgwConfigDetailsComponent } from './rgw-config-details/rgw-config-details.component';
+import { RgwMultisiteWizardComponent } from './rgw-multisite-wizard/rgw-multisite-wizard.component';
+import { RgwMultisiteSyncPolicyDetailsComponent } from './rgw-multisite-sync-policy-details/rgw-multisite-sync-policy-details.component';
+import { RgwMultisiteSyncFlowModalComponent } from './rgw-multisite-sync-flow-modal/rgw-multisite-sync-flow-modal.component';
+import { RgwMultisiteSyncPipeModalComponent } from './rgw-multisite-sync-pipe-modal/rgw-multisite-sync-pipe-modal.component';
+import { RgwMultisiteTabsComponent } from './rgw-multisite-tabs/rgw-multisite-tabs.component';
+import { RgwStorageClassListComponent } from './rgw-storage-class-list/rgw-storage-class-list.component';
+
+import {
+  ButtonModule,
+  GridModule,
+  IconModule,
+  LoadingModule,
+  ModalModule,
+  ProgressIndicatorModule,
+  CodeSnippetModule,
+  InputModule,
+  CheckboxModule,
+  TreeviewModule,
+  RadioModule,
+  SelectModule,
+  NumberModule,
+  TabsModule,
+  AccordionModule,
+  TagModule,
+  TooltipModule
+} from 'carbon-components-angular';
+import { CephSharedModule } from '../shared/ceph-shared.module';
+import { RgwUserAccountsComponent } from './rgw-user-accounts/rgw-user-accounts.component';
+import { RgwUserAccountsFormComponent } from './rgw-user-accounts-form/rgw-user-accounts-form.component';
+import { RgwUserAccountsDetailsComponent } from './rgw-user-accounts-details/rgw-user-accounts-details.component';
+import { RgwStorageClassDetailsComponent } from './rgw-storage-class-details/rgw-storage-class-details.component';
+import { RgwStorageClassFormComponent } from './rgw-storage-class-form/rgw-storage-class-form.component';
+import { RgwBucketTieringFormComponent } from './rgw-bucket-tiering-form/rgw-bucket-tiering-form.component';
+import { RgwBucketLifecycleListComponent } from './rgw-bucket-lifecycle-list/rgw-bucket-lifecycle-list.component';
+import { RgwRateLimitComponent } from './rgw-rate-limit/rgw-rate-limit.component';
+import { RgwRateLimitDetailsComponent } from './rgw-rate-limit-details/rgw-rate-limit-details.component';
 
 @NgModule({
   imports: [
     CommonModule,
+    CephSharedModule,
     SharedModule,
     FormsModule,
-    ReactiveFormsModule,
+    ReactiveFormsModule.withConfig({ callSetDisabledState: 'whenDisabledForLegacyCode' }),
     PerformanceCounterModule,
     NgbNavModule,
     RouterModule,
     NgbTooltipModule,
     NgbPopoverModule,
-    NgxPipeFunctionModule,
-    TreeModule,
+    PipesModule,
+    TreeviewModule,
     DataTableModule,
-    DashboardV3Module
+    DashboardV3Module,
+    NgbTypeaheadModule,
+    ModalModule,
+    GridModule,
+    ProgressIndicatorModule,
+    CodeSnippetModule,
+    ButtonModule,
+    LoadingModule,
+    IconModule,
+    NgbProgressbar,
+    InputModule,
+    AccordionModule,
+    CheckboxModule,
+    SelectModule,
+    NumberModule,
+    TabsModule,
+    IconModule,
+    SelectModule,
+    RadioModule,
+    SelectModule,
+    NumberModule,
+    TagModule,
+    TooltipModule
   ],
   exports: [
     RgwDaemonListComponent,
@@ -69,9 +141,11 @@ import { BucketTagModalComponent } from './bucket-tag-modal/bucket-tag-modal.com
     RgwBucketListComponent,
     RgwBucketDetailsComponent,
     RgwUserListComponent,
-    RgwUserDetailsComponent
+    RgwUserDetailsComponent,
+    RgwStorageClassListComponent
   ],
   declarations: [
+    RgwRateLimitComponent,
     RgwDaemonListComponent,
     RgwDaemonDetailsComponent,
     RgwBucketFormComponent,
@@ -102,8 +176,27 @@ import { BucketTagModalComponent } from './bucket-tag-modal/bucket-tag-modal.com
     RgwSyncPrimaryZoneComponent,
     RgwSyncMetadataInfoComponent,
     RgwSyncDataInfoComponent,
-    BucketTagModalComponent
-  ]
+    BucketTagModalComponent,
+    RgwMultisiteSyncPolicyComponent,
+    RgwMultisiteSyncPolicyFormComponent,
+    RgwConfigDetailsComponent,
+    RgwConfigurationPageComponent,
+    RgwMultisiteWizardComponent,
+    RgwMultisiteSyncPolicyDetailsComponent,
+    RgwMultisiteSyncFlowModalComponent,
+    RgwMultisiteSyncPipeModalComponent,
+    RgwMultisiteTabsComponent,
+    RgwUserAccountsComponent,
+    RgwUserAccountsFormComponent,
+    RgwUserAccountsDetailsComponent,
+    RgwStorageClassListComponent,
+    RgwStorageClassDetailsComponent,
+    RgwStorageClassFormComponent,
+    RgwBucketTieringFormComponent,
+    RgwBucketLifecycleListComponent,
+    RgwRateLimitDetailsComponent
+  ],
+  providers: [TitleCasePipe]
 })
 export class RgwModule {}
 
@@ -132,6 +225,23 @@ const routes: Routes = [
     ]
   },
   {
+    path: 'accounts',
+    data: { breadcrumbs: 'Accounts' },
+    children: [
+      { path: '', component: RgwUserAccountsComponent },
+      {
+        path: URLVerbs.CREATE,
+        component: RgwUserAccountsFormComponent,
+        data: { breadcrumbs: ActionLabels.CREATE }
+      },
+      {
+        path: `${URLVerbs.EDIT}/:id`,
+        component: RgwUserAccountsFormComponent,
+        data: { breadcrumbs: ActionLabels.EDIT }
+      }
+    ]
+  },
+  {
     path: 'roles',
     data: {
       breadcrumbs: 'Roles',
@@ -140,6 +250,10 @@ const routes: Routes = [
         {
           name: 'Users',
           url: '/rgw/user'
+        },
+        {
+          name: 'Accounts',
+          url: '/rgw/accounts'
         },
         {
           name: 'Roles',
@@ -193,7 +307,87 @@ const routes: Routes = [
   {
     path: 'multisite',
     data: { breadcrumbs: 'Multi-site' },
-    children: [{ path: '', component: RgwMultisiteDetailsComponent }]
+    children: [
+      { path: '', redirectTo: 'configuration', pathMatch: 'full' },
+      {
+        path: 'configuration',
+        component: RgwMultisiteDetailsComponent,
+        data: { breadcrumbs: 'Configuration' },
+        children: [
+          {
+            path: 'setup-multisite-replication',
+            component: RgwMultisiteWizardComponent,
+            outlet: 'modal'
+          }
+        ]
+      },
+      {
+        path: 'sync-policy',
+        component: RgwMultisiteSyncPolicyComponent,
+        data: { breadcrumbs: 'Sync-policy' },
+        children: [
+          {
+            path: `${URLVerbs.CREATE}`,
+            component: RgwMultisiteSyncPolicyFormComponent,
+            outlet: 'modal'
+          },
+          {
+            path: `${URLVerbs.EDIT}/:groupName`,
+            component: RgwMultisiteSyncPolicyFormComponent,
+            outlet: 'modal'
+          },
+          {
+            path: `${URLVerbs.EDIT}/:groupName/:bucketName`,
+            component: RgwMultisiteSyncPolicyFormComponent,
+            outlet: 'modal'
+          }
+        ]
+      }
+    ]
+  },
+  {
+    path: 'tiering',
+    data: { breadcrumbs: 'Tiering' },
+    children: [
+      { path: '', component: RgwStorageClassListComponent },
+      {
+        path: URLVerbs.CREATE,
+        component: RgwStorageClassFormComponent,
+        data: { breadcrumbs: ActionLabels.CREATE }
+      }
+    ]
+  },
+  {
+    path: 'nfs',
+    canActivateChild: [FeatureTogglesGuardService, ModuleStatusGuardService],
+    data: {
+      moduleStatusGuardConfig: {
+        uiApiPath: 'nfs-ganesha',
+        redirectTo: 'error',
+        section: 'nfs-ganesha',
+        section_info: 'NFS GANESHA',
+        header: 'NFS-Ganesha is not configured'
+      },
+      breadcrumbs: 'NFS'
+    },
+    children: [
+      { path: '', component: NfsListComponent },
+      {
+        path: URLVerbs.CREATE,
+        component: NfsFormComponent,
+        data: { breadcrumbs: ActionLabels.CREATE }
+      },
+      {
+        path: `${URLVerbs.EDIT}/:cluster_id/:export_id`,
+        component: NfsFormComponent,
+        data: { breadcrumbs: ActionLabels.EDIT }
+      }
+    ]
+  },
+  {
+    path: 'configuration',
+    data: { breadcrumbs: 'Configuration' },
+    children: [{ path: '', component: RgwConfigurationPageComponent }]
   }
 ];
 

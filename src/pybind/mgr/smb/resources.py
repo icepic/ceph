@@ -1,10 +1,16 @@
-from typing import Dict, List, Optional, Union, cast
+from typing import Dict, List, Optional, Tuple, Union, cast
 
+import errno
 import json
 
 import yaml
 
-from ceph.deployment.service_spec import PlacementSpec
+from ceph.deployment.service_spec import (
+    PlacementSpec,
+    SMBClusterPublicIPSpec,
+    SpecValidationError,
+)
+from object_format import ErrorResponseBase
 
 from . import resourcelib, validation
 from .enums import (
@@ -12,9 +18,13 @@ from .enums import (
     CephFSStorageProvider,
     Intent,
     JoinSourceType,
+    LoginAccess,
+    LoginCategory,
+    SMBClustering,
     UserGroupSourceType,
 )
-from .proto import Self, Simplified, checked
+from .proto import Self, Simplified
+from .utils import checked
 
 
 def _get_intent(data: Simplified) -> Intent:
@@ -30,6 +40,51 @@ def _removed(data: Simplified) -> bool:
 def _present(data: Simplified) -> bool:
     """Condition function returning true when the intent is present."""
     return _get_intent(data) == Intent.PRESENT
+
+
+class InvalidResourceError(ValueError, ErrorResponseBase):
+    def __init__(self, msg: str, data: Simplified) -> None:
+        super().__init__(msg)
+        self.resource_data = data
+
+    def to_simplified(self) -> Simplified:
+        return {
+            'resource': self.resource_data,
+            'msg': str(self),
+            'success': False,
+        }
+
+    def format_response(self) -> Tuple[int, str, str]:
+        data = json.dumps(self.to_simplified())
+        return -errno.EINVAL, data, "Invalid resource"
+
+    @classmethod
+    def wrap(cls, err: Exception, data: Simplified) -> Exception:
+        if isinstance(err, ValueError) and not isinstance(
+            err, resourcelib.ResourceTypeError
+        ):
+            return cls(str(err), data)
+        return err
+
+
+class InvalidInputError(ValueError, ErrorResponseBase):
+    summary_max = 1024
+
+    def __init__(self, msg: str, content: str) -> None:
+        super().__init__(msg)
+        self.content = content
+
+    def to_simplified(self) -> Simplified:
+        return {
+            'input': self.content[: self.summary_max],
+            'truncated_input': len(self.content) > self.summary_max,
+            'msg': str(self),
+            'success': False,
+        }
+
+    def format_response(self) -> Tuple[int, str, str]:
+        data = json.dumps(self.to_simplified())
+        return -errno.EINVAL, data, "Invalid input"
 
 
 class _RBase:
@@ -85,6 +140,19 @@ class CephFSStorage(_RBase):
         return rc
 
 
+@resourcelib.component()
+class LoginAccessEntry(_RBase):
+    name: str
+    category: LoginCategory = LoginCategory.USER
+    access: LoginAccess = LoginAccess.READ_ONLY
+
+    def __post_init__(self) -> None:
+        self.access = self.access.expand()
+
+    def validate(self) -> None:
+        validation.check_access_name(self.name)
+
+
 @resourcelib.resource('ceph.smb.share')
 class RemovedShare(_RBase):
     """Represents a share that has / will be removed."""
@@ -104,6 +172,7 @@ class RemovedShare(_RBase):
     @resourcelib.customize
     def _customize_resource(rc: resourcelib.Resource) -> resourcelib.Resource:
         rc.on_condition(_removed)
+        rc.on_construction_error(InvalidResourceError.wrap)
         return rc
 
 
@@ -119,6 +188,9 @@ class Share(_RBase):
     readonly: bool = False
     browseable: bool = True
     cephfs: Optional[CephFSStorage] = None
+    custom_smb_share_options: Optional[Dict[str, str]] = None
+    login_control: Optional[List[LoginAccessEntry]] = None
+    restrict_access: bool = False
 
     def __post_init__(self) -> None:
         # if name is not given explicitly, take it from the share_id
@@ -138,6 +210,11 @@ class Share(_RBase):
         # currently only cephfs is supported
         if self.cephfs is None:
             raise ValueError('a cephfs configuration is required')
+        validation.check_custom_options(self.custom_smb_share_options)
+        if self.restrict_access and not self.login_control:
+            raise ValueError(
+                'a share with restricted access must define at least one login_control entry'
+            )
 
     @property
     def checked_cephfs(self) -> CephFSStorage:
@@ -146,8 +223,14 @@ class Share(_RBase):
 
     @resourcelib.customize
     def _customize_resource(rc: resourcelib.Resource) -> resourcelib.Resource:
+        rc.restrict_access.quiet = True
         rc.on_condition(_present)
+        rc.on_construction_error(InvalidResourceError.wrap)
         return rc
+
+    @property
+    def cleaned_custom_smb_share_options(self) -> Optional[Dict[str, str]]:
+        return validation.clean_custom_options(self.custom_smb_share_options)
 
 
 @resourcelib.component()
@@ -162,18 +245,17 @@ class JoinAuthValues(_RBase):
 class JoinSource(_RBase):
     """Represents data that can be used to join a system to Active Directory."""
 
-    source_type: JoinSourceType
-    auth: Optional[JoinAuthValues] = None
-    uri: str = ''
+    source_type: JoinSourceType = JoinSourceType.RESOURCE
     ref: str = ''
 
     def validate(self) -> None:
-        if self.ref:
+        if not self.ref:
+            raise ValueError('reference value must be specified')
+        else:
             validation.check_id(self.ref)
 
     @resourcelib.customize
     def _customize_resource(rc: resourcelib.Resource) -> resourcelib.Resource:
-        rc.uri.quiet = True
         rc.ref.quiet = True
         return rc
 
@@ -190,40 +272,21 @@ class UserGroupSettings(_RBase):
 class UserGroupSource(_RBase):
     """Represents data used to set up user/group settings for an instance."""
 
-    source_type: UserGroupSourceType
-    values: Optional[UserGroupSettings] = None
-    uri: str = ''
+    source_type: UserGroupSourceType = UserGroupSourceType.RESOURCE
     ref: str = ''
 
     def validate(self) -> None:
-        if self.source_type == UserGroupSourceType.INLINE:
-            pfx = 'inline User/Group configuration'
-            if self.values is None:
-                raise ValueError(pfx + ' requires values')
-            if self.uri:
-                raise ValueError(pfx + ' does not take a uri')
-            if self.ref:
-                raise ValueError(pfx + ' does not take a ref value')
-        if self.source_type == UserGroupSourceType.HTTP_URI:
-            pfx = 'http User/Group configuration'
-            if not self.uri:
-                raise ValueError(pfx + ' requires a uri')
-            if self.values:
-                raise ValueError(pfx + ' does not take inline values')
-            if self.ref:
-                raise ValueError(pfx + ' does not take a ref value')
         if self.source_type == UserGroupSourceType.RESOURCE:
-            pfx = 'resource reference User/Group configuration'
             if not self.ref:
-                raise ValueError(pfx + ' requires a ref value')
-            if self.uri:
-                raise ValueError(pfx + ' does not take a uri')
-            if self.values:
-                raise ValueError(pfx + ' does not take inline values')
+                raise ValueError('reference value must be specified')
+            else:
+                validation.check_id(self.ref)
+        else:
+            if self.ref:
+                raise ValueError('ref may not be specified')
 
     @resourcelib.customize
     def _customize_resource(rc: resourcelib.Resource) -> resourcelib.Resource:
-        rc.uri.quiet = True
         rc.ref.quiet = True
         return rc
 
@@ -246,6 +309,7 @@ class RemovedCluster(_RBase):
     @resourcelib.customize
     def _customize_resource(rc: resourcelib.Resource) -> resourcelib.Resource:
         rc.on_condition(_removed)
+        rc.on_construction_error(InvalidResourceError.wrap)
         return rc
 
     def validate(self) -> None:
@@ -272,8 +336,7 @@ class WrappedPlacementSpec(PlacementSpec):
         # improperly typed. They are improperly typed because typing.Self
         # didn't exist and the old correct way is a PITA to write (and
         # remember).  Thus a lot of classmethods are return the exact class
-        # which is technically incorrect. This fine class is guilty of the same
-        # sin. :-)
+        # which is technically incorrect.
         return cast(Self, cls.from_json(data))
 
     @classmethod
@@ -287,6 +350,25 @@ class WrappedPlacementSpec(PlacementSpec):
         return self.to_json()
 
 
+# This class is a near 1:1 mirror of the service spec helper class.
+@resourcelib.component()
+class ClusterPublicIPAssignment(_RBase):
+    address: str
+    destination: Union[List[str], str, None] = None
+
+    def to_spec(self) -> SMBClusterPublicIPSpec:
+        return SMBClusterPublicIPSpec(
+            address=self.address,
+            destination=self.destination,
+        )
+
+    def validate(self) -> None:
+        try:
+            self.to_spec().validate()
+        except SpecValidationError as err:
+            raise ValueError(str(err)) from err
+
+
 @resourcelib.resource('ceph.smb.cluster')
 class Cluster(_RBase):
     """Represents a cluster (instance) that is / should be present."""
@@ -297,8 +379,12 @@ class Cluster(_RBase):
     domain_settings: Optional[DomainSettings] = None
     user_group_settings: Optional[List[UserGroupSource]] = None
     custom_dns: Optional[List[str]] = None
+    custom_smb_global_options: Optional[Dict[str, str]] = None
     # embedded orchestration placement spec
     placement: Optional[WrappedPlacementSpec] = None
+    # control if the cluster is really a cluster
+    clustering: Optional[SMBClustering] = None
+    public_addrs: Optional[List[ClusterPublicIPAssignment]] = None
 
     def validate(self) -> None:
         if not self.cluster_id:
@@ -324,11 +410,41 @@ class Cluster(_RBase):
                 raise ValueError(
                     'domain settings not supported for user auth mode'
                 )
+        validation.check_custom_options(self.custom_smb_global_options)
 
     @resourcelib.customize
     def _customize_resource(rc: resourcelib.Resource) -> resourcelib.Resource:
         rc.on_condition(_present)
+        rc.on_construction_error(InvalidResourceError.wrap)
         return rc
+
+    @property
+    def cleaned_custom_smb_global_options(self) -> Optional[Dict[str, str]]:
+        return validation.clean_custom_options(self.custom_smb_global_options)
+
+    @property
+    def clustering_mode(self) -> SMBClustering:
+        return self.clustering if self.clustering else SMBClustering.DEFAULT
+
+    def is_clustered(self) -> bool:
+        """Return true if smbd instance should use (CTDB) clustering."""
+        if self.clustering_mode == SMBClustering.ALWAYS:
+            return True
+        if self.clustering_mode == SMBClustering.NEVER:
+            return False
+        # do clustering automatically, based on the placement spec's count value
+        count = 0
+        if self.placement and self.placement.count:
+            count = self.placement.count
+        # clustering enabled unless we're deploying a single instance "cluster"
+        return count != 1
+
+    def service_spec_public_addrs(
+        self,
+    ) -> Optional[List[SMBClusterPublicIPSpec]]:
+        if self.public_addrs is None:
+            return None
+        return [a.to_spec() for a in self.public_addrs]
 
 
 @resourcelib.resource('ceph.smb.join.auth')
@@ -338,11 +454,22 @@ class JoinAuth(_RBase):
     auth_id: str
     intent: Intent = Intent.PRESENT
     auth: Optional[JoinAuthValues] = None
+    # linked resources can only be used by the resource they are linked to
+    # and are automatically removed when the "parent" resource is removed
+    linked_to_cluster: Optional[str] = None
 
     def validate(self) -> None:
         if not self.auth_id:
             raise ValueError('auth_id requires a value')
         validation.check_id(self.auth_id)
+        if self.linked_to_cluster is not None:
+            validation.check_id(self.linked_to_cluster)
+
+    @resourcelib.customize
+    def _customize_resource(rc: resourcelib.Resource) -> resourcelib.Resource:
+        rc.linked_to_cluster.quiet = True
+        rc.on_construction_error(InvalidResourceError.wrap)
+        return rc
 
 
 @resourcelib.resource('ceph.smb.usersgroups')
@@ -352,11 +479,22 @@ class UsersAndGroups(_RBase):
     users_groups_id: str
     intent: Intent = Intent.PRESENT
     values: Optional[UserGroupSettings] = None
+    # linked resources can only be used by the resource they are linked to
+    # and are automatically removed when the "parent" resource is removed
+    linked_to_cluster: Optional[str] = None
 
     def validate(self) -> None:
         if not self.users_groups_id:
             raise ValueError('users_groups_id requires a value')
         validation.check_id(self.users_groups_id)
+        if self.linked_to_cluster is not None:
+            validation.check_id(self.linked_to_cluster)
+
+    @resourcelib.customize
+    def _customize_resource(rc: resourcelib.Resource) -> resourcelib.Resource:
+        rc.linked_to_cluster.quiet = True
+        rc.on_construction_error(InvalidResourceError.wrap)
+        return rc
 
 
 # SMBResource is a union of all valid top-level smb resource types.
@@ -370,19 +508,27 @@ SMBResource = Union[
 ]
 
 
-def load_text(blob: str) -> List[SMBResource]:
+def load_text(
+    blob: str, *, input_sample_max: int = 1024
+) -> List[SMBResource]:
     """Given JSON or YAML return a list of SMBResource objects deserialized
     from the input.
     """
+    json_err = None
     try:
-        data = yaml.safe_load(blob)
-    except ValueError:
-        pass
-    try:
+        # apparently JSON is not always as strict subset of YAML
+        # therefore trying to parse as JSON first is not a waste:
+        # https://john-millikin.com/json-is-not-a-yaml-subset
         data = json.loads(blob)
-    except ValueError:
-        pass
-    return load(data)
+    except ValueError as err:
+        json_err = err
+    try:
+        data = yaml.safe_load(blob) if json_err else data
+    except (ValueError, yaml.parser.ParserError) as err:
+        raise InvalidInputError(str(err), blob) from err
+    if not isinstance(data, (list, dict)):
+        raise InvalidInputError("input must be an object or list", blob)
+    return load(cast(Simplified, data))
 
 
 def load(data: Simplified) -> List[SMBResource]:

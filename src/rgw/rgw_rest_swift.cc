@@ -361,6 +361,7 @@ void RGWListBuckets_ObjStore_SWIFT::dump_bucket_entry(const RGWBucketEnt& ent)
   if (need_stats) {
     s->formatter->dump_int("count", ent.count);
     s->formatter->dump_int("bytes", ent.size);
+    dump_time(s, "last_modified", ent.modification_time);
   }
 
   s->formatter->close_section();
@@ -447,7 +448,6 @@ int RGWListBucket_ObjStore_SWIFT::get_params(optional_yield y)
 }
 
 static void dump_container_metadata(req_state *,
-                                    const rgw::sal::Bucket*,
                                     const std::optional<RGWStorageStats>& stats,
                                     const RGWQuotaInfo&,
                                     const RGWBucketWebsiteConf&);
@@ -458,7 +458,7 @@ void RGWListBucket_ObjStore_SWIFT::send_response()
   map<string, bool>::iterator pref_iter = common_prefixes.begin();
 
   dump_start(s);
-  dump_container_metadata(s, s->bucket.get(), stats, quota.bucket_quota,
+  dump_container_metadata(s, stats, quota.bucket_quota,
                           s->bucket->get_info().website_conf);
 
   s->formatter->open_array_section_with_attrs("container",
@@ -558,7 +558,6 @@ next:
 } // RGWListBucket_ObjStore_SWIFT::send_response
 
 static void dump_container_metadata(req_state *s,
-                                    const rgw::sal::Bucket* bucket,
                                     const std::optional<RGWStorageStats>& stats,
                                     const RGWQuotaInfo& quota,
                                     const RGWBucketWebsiteConf& ws_conf)
@@ -683,7 +682,7 @@ void RGWStatBucket_ObjStore_SWIFT::send_response()
 {
   if (op_ret >= 0) {
     op_ret = STATUS_NO_CONTENT;
-    dump_container_metadata(s, bucket.get(), stats, quota.bucket_quota,
+    dump_container_metadata(s, stats, quota.bucket_quota,
                             s->bucket->get_info().website_conf);
   }
 
@@ -988,7 +987,7 @@ int RGWPutObj_ObjStore_SWIFT::update_slo_segment_size(rgw_slo_entry& entry) {
     return r;
   }
 
-  size_bytes = slo_seg->get_obj_size();
+  size_bytes = slo_seg->get_size();
 
   r = rgw_compression_info_from_attrset(slo_seg->get_attrs(), compressed, cs_info);
   if (r < 0) {
@@ -2640,7 +2639,7 @@ RGWOp* RGWSwiftWebsiteHandler::get_ws_listing_op()
       /* Generate the header now. */
       set_req_state_err(s, op_ret);
       dump_errno(s);
-      dump_container_metadata(s, s->bucket.get(), stats, quota.bucket_quota,
+      dump_container_metadata(s, stats, quota.bucket_quota,
                               s->bucket->get_info().website_conf);
       end_header(s, this, "text/html");
       if (op_ret < 0) {
@@ -2711,26 +2710,25 @@ bool RGWSwiftWebsiteHandler::is_web_dir() const
   obj->set_atomic();
   obj->set_prefetch_data();
 
-  RGWObjState* state = nullptr;
-  if (obj->get_obj_state(s, &state, s->yield, false)) {
+  if (obj->load_obj_state(s, s->yield, false)) {
     return false;
   }
 
   /* A nonexistent object cannot be a considered as a marker representing
    * the emulation of catalog in FS hierarchy. */
-  if (! state->exists) {
+  if (! obj->exists()) {
     return false;
   }
 
   /* Decode the content type. */
   std::string content_type;
-  get_contype_from_attrs(state->attrset, content_type);
+  get_contype_from_attrs(obj->get_attrs(), content_type);
 
   const auto& ws_conf = s->bucket->get_info().website_conf;
   const std::string subdir_marker = ws_conf.subdir_marker.empty()
                                       ? "application/directory"
                                       : ws_conf.subdir_marker;
-  return subdir_marker == content_type && state->size <= 1;
+  return subdir_marker == content_type && obj->get_size() <= 1;
 }
 
 bool RGWSwiftWebsiteHandler::is_index_present(const std::string& index) const
@@ -2740,14 +2738,13 @@ bool RGWSwiftWebsiteHandler::is_index_present(const std::string& index) const
   obj->set_atomic();
   obj->set_prefetch_data();
 
-  RGWObjState* state = nullptr;
-  if (obj->get_obj_state(s, &state, s->yield, false)) {
+  if (obj->load_obj_state(s, s->yield, false)) {
     return false;
   }
 
   /* A nonexistent object cannot be a considered as a viable index. We will
    * try to list the bucket or - if this is impossible - return an error. */
-  return state->exists;
+  return obj->exists();
 }
 
 int RGWSwiftWebsiteHandler::retarget_bucket(RGWOp* op, RGWOp** new_op)

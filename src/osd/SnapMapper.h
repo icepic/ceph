@@ -122,6 +122,8 @@ public:
 class SnapMapper : public Scrub::SnapMapReaderI {
   friend class MapperVerifier; // unit-test support
   friend class DirectMapper; // unit-test support
+  friend std::ostream& operator<<(std::ostream &lhs, const SnapMapper &sm);
+
 public:
   CephContext* cct;
   struct object_snaps {
@@ -329,31 +331,20 @@ private:
     uint32_t bits,   ///< [in] current split bits
     int64_t pool,    ///< [in] pool
     shard_id_t shard ///< [in] shard
-    )
-    : cct(cct), backend(driver), mask_bits(bits), match(match), pool(pool),
-      shard(shard), shard_prefix(make_shard_prefix(shard)) {
-    update_bits(mask_bits);
-  }
+    );
 
   /// Update bits in case of pg split or merge
   void update_bits(
     uint32_t new_bits  ///< [in] new split bits
-    ) {
-    mask_bits = new_bits;
-    std::set<std::string> _prefixes = hobject_t::get_prefixes(
-      mask_bits,
-      match,
-      pool);
-    prefixes.clear();
-    for (auto i = _prefixes.begin(); i != _prefixes.end(); ++i) {
-      prefixes.insert(shard_prefix + *i);
-    }
-
-    reset_prefix_itr(CEPH_NOSNAP, "update_bits");
-  }
+    );
 
   const std::set<std::string>::iterator get_prefix_itr() {
     return prefix_itr;
+  }
+
+  /// reset the MapCacher backend, this should be called on pg interval change
+  void reset_backend() {
+    backend.reset();
   }
 
   /// Update snaps for oid, empty new_snaps removes the mapping
@@ -389,6 +380,10 @@ private:
     std::set<snapid_t> *snaps ///< [out] snaps
     ) const; ///< @return error, -ENOENT if oid is not recorded
 
+  void update_snap_map(
+    const pg_log_entry_t& i,
+    MapCacher::Transaction<std::string, ceph::buffer::list> *t);
+
   /// Get snaps for oid - alternative interface
   tl::expected<std::set<snapid_t>, SnapMapReaderI::result_t> get_snaps(
     const hobject_t &hoid) const final;
@@ -404,5 +399,15 @@ private:
 };
 WRITE_CLASS_ENCODER(SnapMapper::object_snaps)
 WRITE_CLASS_ENCODER(SnapMapper::Mapping)
+
+inline std::ostream& operator<<(std::ostream& os, const SnapMapper& sm)
+{
+  os << fmt::format(" [pg_id:{:x}, match:{}, mask_bits:{}, "
+                    "last_key_checked:{}, pool:{}, shard:{}, "
+                    "shard_prefix: {}, prefixes: {}] ",
+                    sm.match, sm.match, sm.mask_bits, sm.last_key_checked,
+                    sm.pool, sm.shard.id, sm.shard_prefix, sm.prefixes);
+  return os;
+}
 
 #endif

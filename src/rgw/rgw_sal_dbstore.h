@@ -38,22 +38,30 @@ public:
   }
 };
 
-class DBLifecycle : public StoreLifecycle {
+class DBLifecycle : public Lifecycle {
   DBStore* store;
 
 public:
   DBLifecycle(DBStore* _st) : store(_st) {}
 
-  using StoreLifecycle::get_entry;
-  virtual int get_entry(const std::string& oid, const std::string& marker, std::unique_ptr<LCEntry>* entry) override;
-  virtual int get_next_entry(const std::string& oid, const std::string& marker, std::unique_ptr<LCEntry>* entry) override;
-  virtual int set_entry(const std::string& oid, LCEntry& entry) override;
-  virtual int list_entries(const std::string& oid, const std::string& marker,
+  virtual int get_entry(const DoutPrefixProvider* dpp, optional_yield y,
+                        const std::string& oid, const std::string& marker,
+                        LCEntry& entry) override;
+  virtual int get_next_entry(const DoutPrefixProvider* dpp, optional_yield y,
+                             const std::string& oid, const std::string& marker,
+                             LCEntry& entry) override;
+  virtual int set_entry(const DoutPrefixProvider* dpp, optional_yield y,
+                        const std::string& oid, const LCEntry& entry) override;
+  virtual int list_entries(const DoutPrefixProvider* dpp, optional_yield y,
+                           const std::string& oid, const std::string& marker,
 			   uint32_t max_entries,
-			   std::vector<std::unique_ptr<LCEntry>>& entries) override;
-  virtual int rm_entry(const std::string& oid, LCEntry& entry) override;
-  virtual int get_head(const std::string& oid, std::unique_ptr<LCHead>* head) override;
-  virtual int put_head(const std::string& oid, LCHead& head) override;
+			   std::vector<LCEntry>& entries) override;
+  virtual int rm_entry(const DoutPrefixProvider* dpp, optional_yield y,
+                       const std::string& oid, const LCEntry& entry) override;
+  virtual int get_head(const DoutPrefixProvider* dpp, optional_yield y,
+                       const std::string& oid, LCHead& head) override;
+  virtual int put_head(const DoutPrefixProvider* dpp, optional_yield y,
+                       const std::string& oid, const LCHead& head) override;
   virtual std::unique_ptr<LCSerializer> get_serializer(const std::string& lock_name,
 						       const std::string& oid,
 						       const std::string& cookie) override;
@@ -260,22 +268,22 @@ protected:
   class DBZone : public StoreZone {
     protected:
       DBStore* store;
-      RGWRealm *realm{nullptr};
-      DBZoneGroup *zonegroup{nullptr};
-      RGWZone *zone_public_config{nullptr}; /* external zone params, e.g., entrypoints, log flags, etc. */
-      RGWZoneParams *zone_params{nullptr}; /* internal zone params, e.g., rados pools */
-      RGWPeriod *current_period{nullptr};
+	std::unique_ptr<RGWRealm> realm;
+	std::unique_ptr<DBZoneGroup> zonegroup;
+	std::unique_ptr<RGWZone> zone_public_config; /* external zone params, e.g., entrypoints, log flags, etc. */
+	std::unique_ptr<RGWZoneParams> zone_params; /* internal zone params, e.g., rados pools */
+	std::unique_ptr<RGWPeriod> current_period;
 
     public:
       DBZone(DBStore* _store) : store(_store) {
-	realm = new RGWRealm();
+	realm = std::make_unique<RGWRealm>();
 	std::unique_ptr<RGWZoneGroup> rzg = std::make_unique<RGWZoneGroup>("default", "default");
 	rzg->api_name = "default";
 	rzg->is_master = true;
-        zonegroup = new DBZoneGroup(store, std::move(rzg));
-        zone_public_config = new RGWZone();
-        zone_params = new RGWZoneParams();
-        current_period = new RGWPeriod();
+	zonegroup = std::make_unique<DBZoneGroup>(store, std::move(rzg));
+	zone_public_config = std::make_unique<RGWZone>();
+	zone_params = std::make_unique<RGWZoneParams>();
+	current_period = std::make_unique<RGWPeriod>();
 
         // XXX: only default and STANDARD supported for now
         RGWZonePlacementInfo info;
@@ -284,13 +292,7 @@ protected:
         info.storage_classes = sc;
         zone_params->placement_pools["default"] = info;
       }
-      ~DBZone() {
-	delete realm;
-	delete zonegroup;
-	delete zone_public_config;
-	delete zone_params;
-	delete current_period;
-      }
+	~DBZone() = default;
 
       virtual std::unique_ptr<Zone> clone() override {
 	return std::make_unique<DBZone>(store);
@@ -301,7 +303,6 @@ protected:
       virtual const std::string& get_name() const override;
       virtual bool is_writeable() override;
       virtual bool get_redirect_endpoint(std::string* endpoint) override;
-      virtual bool has_zonegroup_api(const std::string& api) const override;
       virtual const std::string& get_current_period_id() override;
       virtual const RGWAccessKey& get_system_key() override;
       virtual const std::string& get_realm_name() override;
@@ -363,7 +364,9 @@ protected:
     virtual uint64_t get_size() { return info.accounted_size; }
     virtual const std::string& get_etag() { return info.etag; }
     virtual ceph::real_time& get_mtime() { return info.modified; }
-
+    virtual const std::optional<rgw::cksum::Cksum>& get_cksum() {
+      return info.cksum;
+    }
   };
 
   class DBMPObj {
@@ -449,7 +452,13 @@ protected:
 		       RGWCompressionInfo& cs_info, off_t& ofs,
 		       std::string& tag, ACLOwner& owner,
 		       uint64_t olh_epoch,
-		       rgw::sal::Object* target_obj) override;
+		       rgw::sal::Object* target_obj,
+		       prefix_map_t& processed_prefixes) override;
+  virtual int cleanup_orphaned_parts(const DoutPrefixProvider *dpp,
+                                     CephContext *cct, optional_yield y,
+                                     const rgw_obj& obj,
+                                     std::list<rgw_obj_index_key>& remove_objs,
+                                     prefix_map_t& processed_prefixes) override;
     virtual int get_info(const DoutPrefixProvider *dpp, optional_yield y, rgw_placement_rule** rule, rgw::sal::Attrs* attrs = nullptr) override;
     virtual std::unique_ptr<Writer> get_writer(const DoutPrefixProvider *dpp,
 			  optional_yield y,
@@ -519,9 +528,12 @@ protected:
 
       DBObject(DBObject& _o) = default;
 
+      virtual unsigned get_subsys() { return ceph_subsys_rgw_dbstore; };
       virtual int delete_object(const DoutPrefixProvider* dpp,
           optional_yield y,
-          uint32_t flags) override;
+          uint32_t flags,
+          std::list<rgw_obj_index_key>* remove_objs,
+          RGWObjVersionTracker* objv) override;
       virtual int copy_object(const ACLOwner& owner,
           const rgw_user& remote_user,
           req_info* info, const rgw_zone_id& source_zone,
@@ -541,8 +553,15 @@ protected:
       virtual RGWAccessControlPolicy& get_acl(void) override { return acls; }
       virtual int set_acl(const RGWAccessControlPolicy& acl) override { acls = acl; return 0; }
 
-      virtual int get_obj_state(const DoutPrefixProvider* dpp, RGWObjState **state, optional_yield y, bool follow_olh = true) override;
-      virtual int set_obj_attrs(const DoutPrefixProvider* dpp, Attrs* setattrs, Attrs* delattrs, optional_yield y) override;
+      virtual int set_obj_attrs(const DoutPrefixProvider* dpp, Attrs* setattrs, Attrs* delattrs, optional_yield y, uint32_t flags) override;
+
+      /** If multipart, enumerate (a range [marker..marker+[min(max_parts, parts_count-1)] of) parts of the object */
+      virtual int list_parts(const DoutPrefixProvider* dpp, CephContext* cct,
+			   int max_parts, int marker, int* next_marker,
+			   bool* truncated, list_parts_each_t each_func,
+			   optional_yield y) override;
+
+      virtual int load_obj_state(const DoutPrefixProvider* dpp, optional_yield y, bool follow_olh = true) override;
       virtual int get_obj_attrs(optional_yield y, const DoutPrefixProvider* dpp, rgw_obj* target_obj = NULL) override;
       virtual int modify_obj_attrs(const char* attr_name, bufferlist& attr_val, optional_yield y, const DoutPrefixProvider* dpp) override;
       virtual int delete_obj_attrs(const DoutPrefixProvider* dpp, const char* attr_name, optional_yield y) override;
@@ -633,6 +652,7 @@ protected:
     virtual int complete(size_t accounted_size, const std::string& etag,
                          ceph::real_time *mtime, ceph::real_time set_mtime,
                          std::map<std::string, bufferlist>& attrs,
+			 const std::optional<rgw::cksum::Cksum>& cksum,
                          ceph::real_time delete_at,
                          const char *if_match, const char *if_nomatch,
                          const std::string *user_data,
@@ -682,6 +702,7 @@ public:
     virtual int complete(size_t accounted_size, const std::string& etag,
                        ceph::real_time *mtime, ceph::real_time set_mtime,
                        std::map<std::string, bufferlist>& attrs,
+		       const std::optional<rgw::cksum::Cksum>& cksum,
                        ceph::real_time delete_at,
                        const char *if_match, const char *if_nomatch,
                        const std::string *user_data,
@@ -864,6 +885,7 @@ public:
       virtual int list_all_zones(const DoutPrefixProvider* dpp, std::list<std::string>& zone_ids) override;
       virtual int cluster_stat(RGWClusterStat& stats) override;
       virtual std::unique_ptr<Lifecycle> get_lifecycle(void) override;
+      virtual bool process_expired_objects(const DoutPrefixProvider *dpp, optional_yield y) override;
 
   virtual std::unique_ptr<Notification> get_notification(
     rgw::sal::Object* obj, rgw::sal::Object* src_obj, req_state* s,

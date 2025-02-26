@@ -162,9 +162,12 @@ struct ScrubMachineListener {
   /// the part that actually finalizes a scrub
   virtual void scrub_finish() = 0;
 
-  /// notify the scrubber about a scrub failure
-  /// (note: temporary implementation)
-  virtual void penalize_next_scrub(Scrub::delay_cause_t cause) = 0;
+  /**
+   * The scrub session was aborted. We must restore the scheduling object
+   * that triggered the scrub back to the queue - but we may have to update
+   * it with changes requested (e.g. by an operator command).
+   */
+  virtual void on_mid_scrub_abort(Scrub::delay_cause_t cause) = 0;
 
   /**
    * Prepare a MOSDRepScrubMap message carrying the requested scrub map
@@ -204,18 +207,6 @@ struct ScrubMachineListener {
   virtual void maps_compare_n_cleanup() = 0;
 
   virtual void set_scrub_duration(std::chrono::milliseconds duration) = 0;
-
-  /**
-   * No new scrub session will start while a scrub was initiate on a PG,
-   * and that PG is trying to acquire replica resources.
-   * set_reserving_now()/clear_reserving_now() let's the OSD scrub-queue know
-   * we are busy reserving.
-   *
-   * set_reserving_now() returns 'false' if there already is a PG in the
-   * reserving stage of the scrub session.
-   */
-  virtual bool set_reserving_now() = 0;
-  virtual void clear_reserving_now() = 0;
 
   /**
    * Manipulate the 'I am being scrubbed now' Scrubber's flag
@@ -259,6 +250,6 @@ struct ScrubMachineListener {
   /// delay next retry of this PG after a replica reservation failure
   virtual void flag_reservations_failure() = 0;
 
-  /// is this scrub more than just regular periodic scrub?
-  [[nodiscard]] virtual bool is_high_priority() const = 0;
+  /// is this scrub's urgency high enough, or must it reserve its replicas?
+  [[nodiscard]] virtual bool is_reservation_required() const = 0;
 };

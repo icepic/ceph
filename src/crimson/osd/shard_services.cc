@@ -593,8 +593,8 @@ seastar::future<Ref<PG>> ShardServices::make_pg(
     std::move(get_pool_info_for_pg),
     std::move(get_collection)
   ).then([pgid, create_map, this](auto &&ret) {
-    auto [pool, name, ec_profile] = std::move(std::get<0>(ret).get0());
-    auto coll = std::move(std::get<1>(ret).get0());
+    auto [pool, name, ec_profile] = std::move(std::get<0>(ret).get());
+    auto coll = std::move(std::get<1>(ret).get());
     return seastar::make_ready_future<Ref<PG>>(
       new PG{
 	pgid,
@@ -767,20 +767,31 @@ seastar::future<> ShardServices::dispatch_context_transaction(
   LOG_PREFIX(OSDSingletonState::dispatch_context_transaction);
   if (ctx.transaction.empty()) {
     DEBUG("empty transaction");
-    return seastar::now();
+    co_await get_store().flush(col);
+    Context* on_commit(
+      ceph::os::Transaction::collect_all_contexts(ctx.transaction));
+    if (on_commit) {
+      on_commit->complete(0);
+    }
+    co_return;
   }
 
   DEBUG("do_transaction ...");
-  auto ret = get_store().do_transaction(
+  co_await get_store().do_transaction(
     col,
     ctx.transaction.claim_and_reset());
-  return ret;
+  co_return;
+}
+
+Ref<PG> ShardServices::get_pg(spg_t pgid)
+{
+  return local_state.get_pg(pgid);
 }
 
 seastar::future<> ShardServices::dispatch_context_messages(
   BufferedRecoveryMessages &&ctx)
 {
-  LOG_PREFIX(OSDSingletonState::dispatch_context_transaction);
+  LOG_PREFIX(OSDSingletonState::dispatch_context_messages);
   auto ret = seastar::parallel_for_each(std::move(ctx.message_map),
     [FNAME, this](auto& osd_messages) {
       auto& [peer, messages] = osd_messages;
@@ -796,15 +807,19 @@ seastar::future<> ShardServices::dispatch_context_messages(
 
 seastar::future<> ShardServices::dispatch_context(
   crimson::os::CollectionRef col,
-  PeeringCtx &&ctx)
+  PeeringCtx &&pctx)
 {
-  ceph_assert(col || ctx.transaction.empty());
-  return seastar::when_all_succeed(
-    dispatch_context_messages(
-      BufferedRecoveryMessages{ctx}),
-    col ? dispatch_context_transaction(col, ctx) : seastar::now()
-  ).then_unpack([] {
-    return seastar::now();
+  return seastar::do_with(
+    std::move(pctx),
+    [this, col](auto &ctx) {
+    ceph_assert(col || ctx.transaction.empty());
+    return seastar::when_all_succeed(
+      dispatch_context_messages(
+       BufferedRecoveryMessages{ctx}),
+      col ? dispatch_context_transaction(col, ctx) : seastar::now()
+    ).then_unpack([] {
+      return seastar::now();
+    });
   });
 }
 

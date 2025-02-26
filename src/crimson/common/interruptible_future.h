@@ -408,7 +408,7 @@ public:
   template <typename U>
   using interrupt_futurize_t =
     typename interruptor<InterruptCond>::template futurize_t<U>;
-  using core_type::get0;
+  using core_type::get;
   using core_type::core_type;
   using core_type::get_exception;
   using core_type::ignore_ready_future;
@@ -719,7 +719,7 @@ class [[nodiscard]] interruptible_future_detail<
 {
 public:
   using core_type = ErroratedFuture<crimson::errorated_future_marker<T>>;
-  using core_type::unsafe_get0;
+  using core_type::unsafe_get;
   using errorator_type = typename core_type::errorator_type;
   using interrupt_errorator_type =
     interruptible_errorator<InterruptCond, errorator_type>;
@@ -1179,7 +1179,7 @@ public:
       std::move(ic),
       std::forward<OpFunc>(opfunc),
       std::forward<Params>(params)...
-    ).template handle_interruption(std::move(efunc));
+    ).handle_interruption(std::move(efunc));
   }
 
   template <typename OpFunc, typename OnInterrupt,
@@ -1228,6 +1228,17 @@ public:
 		  interrupt_condition,
 		  std::forward<Func>(func));
 	    };
+  }
+
+  template <typename Lock, typename Func>
+  [[gnu::always_inline]]
+  static auto with_lock(Lock& lock, Func&& func) {
+    return seastar::with_lock(
+      lock,
+      [func=std::move(func),
+       interrupt_condition=interrupt_cond<InterruptCond>.interrupt_cond]() mutable {
+      return call_with_interruption(interrupt_condition, func);
+    });
   }
 
   template <typename Iterator,
@@ -1319,6 +1330,27 @@ public:
       );
     }
   }
+
+  template <InvokeReturnsInterruptibleFuture AsyncAction>
+  [[gnu::always_inline]]
+  static auto repeat_eagain(AsyncAction&& action) {
+    return seastar::do_with(
+      std::forward<AsyncAction>(action),
+      [] (auto &f) {
+      return repeat([&f] {
+	return std::invoke(f
+	).si_then([] {
+	  return seastar::stop_iteration::yes;
+	}).handle_error_interruptible(
+	  [](const crimson::ct_error::eagain &e) {
+	    return seastar::stop_iteration::no;
+	  },
+	  crimson::ct_error::pass_further_all{}
+	);
+      });
+    });
+  }
+
   template <typename AsyncAction>
   requires (!InvokeReturnsInterruptibleFuture<AsyncAction>)
   [[gnu::always_inline]]
@@ -1410,7 +1442,7 @@ public:
         ret = seastar::futurize_invoke(mapper, *begin++).then_wrapped_interruptible(
 	    [s = s.get(), ret = std::move(ret)] (auto f) mutable {
             try {
-                s->result = s->reduce(std::move(s->result), std::move(f.get0()));
+                s->result = s->reduce(std::move(s->result), std::move(f.get()));
                 return std::move(ret);
             } catch (...) {
                 return std::move(ret).then_wrapped_interruptible([ex = std::current_exception()] (auto f) {

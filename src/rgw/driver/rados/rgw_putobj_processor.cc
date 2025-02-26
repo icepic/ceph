@@ -22,6 +22,8 @@
 #include "services/svc_zone.h"
 #include "rgw_sal_rados.h"
 
+#include "cls/version/cls_version_client.h"
+
 #define dout_subsys ceph_subsys_rgw
 
 using namespace std;
@@ -338,19 +340,21 @@ int AtomicObjectProcessor::prepare(optional_yield y)
   return 0;
 }
 
-int AtomicObjectProcessor::complete(size_t accounted_size,
-                                    const std::string& etag,
-                                    ceph::real_time *mtime,
-                                    ceph::real_time set_mtime,
-                                    rgw::sal::Attrs& attrs,
-                                    ceph::real_time delete_at,
-                                    const char *if_match,
-                                    const char *if_nomatch,
-                                    const std::string *user_data,
-                                    rgw_zone_set *zones_trace,
-                                    bool *pcanceled, 
-                                    const req_context& rctx,
-                                    uint32_t flags)
+int AtomicObjectProcessor::complete(
+				size_t accounted_size,
+				const std::string& etag,
+				ceph::real_time *mtime,
+				ceph::real_time set_mtime,
+				rgw::sal::Attrs& attrs,
+				const std::optional<rgw::cksum::Cksum>& cksum,
+				ceph::real_time delete_at,
+				const char *if_match,
+				const char *if_nomatch,
+				const std::string *user_data,
+				rgw_zone_set *zones_trace,
+				bool *pcanceled, 
+				const req_context& rctx,
+				uint32_t flags)
 {
   int r = writer.drain();
   if (r < 0) {
@@ -486,19 +490,21 @@ int MultipartObjectProcessor::prepare(optional_yield y)
   return prepare_head();
 }
 
-int MultipartObjectProcessor::complete(size_t accounted_size,
-                                       const std::string& etag,
-                                       ceph::real_time *mtime,
-                                       ceph::real_time set_mtime,
-                                       std::map<std::string, bufferlist>& attrs,
-                                       ceph::real_time delete_at,
-                                       const char *if_match,
-                                       const char *if_nomatch,
-                                       const std::string *user_data,
-                                       rgw_zone_set *zones_trace,
-                                       bool *pcanceled, 
-                                       const req_context& rctx,
-                                       uint32_t flags)
+int MultipartObjectProcessor::complete(
+			       size_t accounted_size,
+			       const std::string& etag,
+			       ceph::real_time *mtime,
+			       ceph::real_time set_mtime,
+			       std::map<std::string, bufferlist>& attrs,
+			       const std::optional<rgw::cksum::Cksum>& cksum,
+			       ceph::real_time delete_at,
+			       const char *if_match,
+			       const char *if_nomatch,
+			       const std::string *user_data,
+			       rgw_zone_set *zones_trace,
+			       bool *pcanceled, 
+			       const req_context& rctx,
+			       uint32_t flags)
 {
   int r = writer.drain();
   if (r < 0) {
@@ -541,6 +547,7 @@ int MultipartObjectProcessor::complete(size_t accounted_size,
   }
   info.num = part_num;
   info.etag = etag;
+  info.cksum = cksum;
   info.size = actual_size;
   info.accounted_size = accounted_size;
   info.modified = real_clock::now();
@@ -568,7 +575,9 @@ int MultipartObjectProcessor::complete(size_t accounted_size,
   }
 
   librados::ObjectWriteOperation op;
+  op.assert_exists();
   cls_rgw_mp_upload_part_info_update(op, p, info);
+  cls_version_inc(op);
   r = rgw_rados_operate(rctx.dpp, meta_obj_ref.ioctx, meta_obj_ref.obj.oid, &op, rctx.y);
   ldpp_dout(rctx.dpp, 20) << "Update meta: " << meta_obj_ref.obj.oid << " part " << p << " prefix " << info.manifest.get_prefix() << " return " << r << dendl;
 
@@ -583,9 +592,16 @@ int MultipartObjectProcessor::complete(size_t accounted_size,
     op = librados::ObjectWriteOperation{};
     op.assert_exists(); // detect races with abort
     op.omap_set(m);
+    cls_version_inc(op);
     r = rgw_rados_operate(rctx.dpp, meta_obj_ref.ioctx, meta_obj_ref.obj.oid, &op, rctx.y);
   }
+
   if (r < 0) {
+    if (r == -ETIMEDOUT) {
+      // The meta_obj_ref write may eventually succeed, clear the set of objects for deletion. if it
+      // doesn't ever succeed, we'll orphan any tail objects as if we'd crashed before that write
+      writer.clear_written();
+    }
     return r == -ENOENT ? -ERR_NO_SUCH_UPLOAD : r;
   }
 
@@ -701,11 +717,16 @@ int AppendObjectProcessor::prepare(optional_yield y)
   return 0;
 }
 
-int AppendObjectProcessor::complete(size_t accounted_size, const string &etag, ceph::real_time *mtime,
-                                    ceph::real_time set_mtime, rgw::sal::Attrs& attrs,
-                                    ceph::real_time delete_at, const char *if_match, const char *if_nomatch,
-                                    const string *user_data, rgw_zone_set *zones_trace, bool *pcanceled,
-                                    const req_context& rctx, uint32_t flags)
+int AppendObjectProcessor::complete(
+			    size_t accounted_size,
+			    const string &etag, ceph::real_time *mtime,
+			    ceph::real_time set_mtime, rgw::sal::Attrs& attrs,
+			    const std::optional<rgw::cksum::Cksum>& cksum,
+			    ceph::real_time delete_at, const char *if_match,
+			    const char *if_nomatch,
+			    const string *user_data, rgw_zone_set *zones_trace,
+			    bool *pcanceled,
+			    const req_context& rctx, uint32_t flags)
 {
   int r = writer.drain();
   if (r < 0)
@@ -764,8 +785,14 @@ int AppendObjectProcessor::complete(size_t accounted_size, const string &etag, c
   }
   r = obj_op.write_meta(actual_size + cur_size,
 			accounted_size + *cur_accounted_size,
-			attrs, rctx, writer.get_trace(), flags & rgw::sal::FLAG_LOG_OP);
+			attrs, rctx, writer.get_trace(),
+			flags & rgw::sal::FLAG_LOG_OP);
   if (r < 0) {
+      if (r == -ETIMEDOUT) {
+      // The head object write may eventually succeed, clear the set of objects for deletion. if it
+      // doesn't ever succeed, we'll orphan any tail objects as if we'd crashed before that write
+      writer.clear_written();
+    }
     return r;
   }
   if (!obj_op.meta.canceled) {

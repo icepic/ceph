@@ -3,9 +3,14 @@
 
 #include <atomic>
 #include <ctime>
+#include <iomanip>
+#include <list>
 #include <memory>
-#include <vector>
 
+#include <boost/asio/bind_executor.hpp>
+#include <boost/asio/bind_cancellation_slot.hpp>
+#include <boost/asio/cancellation_signal.hpp>
+#include <boost/asio/detached.hpp>
 #include <boost/asio/error.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -25,6 +30,7 @@
 
 #include "rgw_asio_client.h"
 #include "rgw_asio_frontend.h"
+#include "rgw_asio_thread.h"
 
 #ifdef WITH_RADOSGW_BEAST_OPENSSL
 #include <boost/asio/ssl.hpp>
@@ -61,6 +67,44 @@ using parse_buffer = boost::beast::flat_static_buffer<parse_buffer_size>;
 // use mmap/mprotect to allocate 512k coroutine stacks
 auto make_stack_allocator() {
   return boost::context::protected_fixedsize_stack{512*1024};
+}
+
+static constexpr std::chrono::milliseconds BACKOFF_MAX_WAIT(5000);
+
+class RGWAsioBackoff {
+  using Clock = ceph::coarse_mono_clock;
+  using Timer = boost::asio::basic_waitable_timer<Clock>;
+  Timer timer;
+
+  ceph::timespan cur_wait;
+  void update_wait_time();
+public:
+  explicit RGWAsioBackoff(boost::asio::io_context& context) :
+                          timer(context),
+                          cur_wait(std::chrono::milliseconds(1)) {
+  }
+
+  void backoff_sleep(boost::asio::yield_context yield);
+  void reset() {
+    cur_wait = std::chrono::milliseconds(1);
+  }
+};
+
+void RGWAsioBackoff::update_wait_time()
+{
+  if (cur_wait < BACKOFF_MAX_WAIT) {
+    cur_wait = cur_wait * 2;
+  }
+  if (cur_wait > BACKOFF_MAX_WAIT) {
+    cur_wait = BACKOFF_MAX_WAIT;
+  }
+}
+
+void RGWAsioBackoff::backoff_sleep(boost::asio::yield_context yield)
+{
+  update_wait_time();
+  timer.expires_after(cur_wait);
+  timer.async_wait(yield);
 }
 
 using namespace std;
@@ -280,6 +324,16 @@ void handle_connection(boost::asio::io_context& context,
                                   rgw::io::add_conlen_controlling(
                                     &real_client))));
       RGWRestfulIO client(cct, &real_client_io);
+      // getting ssl_cipher and tls_version
+      if(is_ssl) {
+        ceph_assert(typeid(Stream) == typeid(boost::asio::ssl::stream<tcp::socket&>));
+        const SSL * native_handle = reinterpret_cast<const SSL *>(stream.native_handle());
+        const auto ssl_cipher = SSL_CIPHER_get_name(SSL_get_current_cipher(native_handle));
+        const auto tls_version = SSL_get_version(native_handle);
+        auto& client_env = client.get_env();
+        client_env.set("SSL_CIPHER", ssl_cipher);
+        client_env.set("TLS_VERSION", tls_version);
+      }
       optional_yield y = null_yield;
       if (cct->_conf->rgw_beast_enable_async) {
         y = optional_yield{yield};
@@ -323,7 +377,7 @@ void handle_connection(boost::asio::io_context& context,
     // if we failed before reading the entire message, discard any remaining
     // bytes before reading the next
     while (!expect_continue && !parser.is_done()) {
-      static std::array<char, 1024> discard_buffer;
+      static std::array<char, 1024*1024> discard_buffer;
 
       auto& body = parser.get().body();
       body.size = discard_buffer.size();
@@ -423,29 +477,34 @@ class AsioFrontend {
     tcp::endpoint endpoint;
     tcp::acceptor acceptor;
     tcp::socket socket;
+    boost::asio::cancellation_signal signal;
     bool use_ssl = false;
     bool use_nodelay = false;
 
     explicit Listener(boost::asio::io_context& context)
       : acceptor(context), socket(context) {}
   };
-  std::vector<Listener> listeners;
+  std::list<Listener> listeners;
 
   ConnectionList connections;
 
   std::atomic<bool> going_down{false};
 
+  RGWAsioBackoff backoff;
   CephContext* ctx() const { return cct.get(); }
   std::optional<dmc::ClientCounters> client_counters;
   std::unique_ptr<dmc::ClientConfig> client_config;
-  void accept(Listener& listener, boost::system::error_code ec);
+
+  void accept(Listener& listener, boost::asio::yield_context yield);
+  void on_accept(Listener& listener, tcp::socket stream);
 
  public:
   AsioFrontend(RGWProcessEnv& env, RGWFrontendConfig* conf,
 	       dmc::SchedulerCtx& sched_ctx,
 	       boost::asio::io_context& context)
     : env(env), conf(conf), context(context),
-      pause_mutex(context.get_executor())
+      pause_mutex(context.get_executor()),
+      backoff(context)
   {
     auto sched_t = dmc::get_scheduler_t(ctx());
     switch(sched_t){
@@ -682,10 +741,13 @@ int AsioFrontend::init()
       }
     }
     l.acceptor.listen(max_connection_backlog);
-    l.acceptor.async_accept(l.socket,
-                            [this, &l] (boost::system::error_code ec) {
-                              accept(l, ec);
-                            });
+
+    // spawn a cancellable coroutine to the run the accept loop
+    boost::asio::spawn(context,
+      [this, &l] (boost::asio::yield_context yield) mutable {
+        accept(l, yield);
+      }, bind_cancellation_slot(l.signal.slot(),
+             bind_executor(context, boost::asio::detached)));
 
     ldout(ctx(), 4) << "frontend listening on " << l.endpoint << dendl;
     socket_bound = true;
@@ -1002,22 +1064,39 @@ int AsioFrontend::init_ssl()
 }
 #endif // WITH_RADOSGW_BEAST_OPENSSL
 
-void AsioFrontend::accept(Listener& l, boost::system::error_code ec)
+void AsioFrontend::accept(Listener& l, boost::asio::yield_context yield)
 {
-  if (!l.acceptor.is_open()) {
-    return;
-  } else if (ec == boost::asio::error::operation_aborted) {
-    return;
-  } else if (ec) {
-    ldout(ctx(), 1) << "accept failed: " << ec.message() << dendl;
-    return;
+  for (;;) {
+    boost::system::error_code ec;
+    l.acceptor.async_accept(l.socket, yield[ec]);
+
+    if (!l.acceptor.is_open()) {
+      return;
+    } else if (ec == boost::asio::error::operation_aborted) {
+      return;
+    } else if (ec) {
+      ldout(ctx(), 1) << "accept failed: " << ec.message() << dendl;
+      if (ec == boost::system::errc::too_many_files_open ||
+          ec == boost::system::errc::too_many_files_open_in_system ||
+          ec == boost::system::errc::no_buffer_space ||
+          ec == boost::system::errc::not_enough_memory) {
+        // always retry accept() if we hit a resource limit
+        backoff.backoff_sleep(yield);
+        continue;
+      }
+      ldout(ctx(), 0) << "accept stopped due to error: " << ec.message() << dendl;
+      return;
+    }
+
+    backoff.reset();
+    on_accept(l, std::move(l.socket));
   }
-  auto stream = std::move(l.socket);
+}
+
+void AsioFrontend::on_accept(Listener& l, tcp::socket stream)
+{
+  boost::system::error_code ec;
   stream.set_option(tcp::no_delay(l.use_nodelay), ec);
-  l.acceptor.async_accept(l.socket,
-                          [this, &l] (boost::system::error_code ec) {
-                            accept(l, ec);
-                          });
   
   // spawn a coroutine to handle the connection
 #ifdef WITH_RADOSGW_BEAST_OPENSSL
@@ -1085,7 +1164,23 @@ void AsioFrontend::stop()
   // close all listeners
   for (auto& listener : listeners) {
     listener.acceptor.close(ec);
+    // signal cancellation of accept()
+    listener.signal.emit(boost::asio::cancellation_type::terminal);
   }
+
+  const bool graceful_stop{ g_ceph_context->_conf->rgw_graceful_stop };
+  if (graceful_stop) {
+    ldout(ctx(), 4) << "frontend pausing and waiting for outstanding requests to complete..." << dendl;
+    pause_mutex.lock(ec);
+    if (ec) {
+      ldout(ctx(), 1) << "frontend failed to pause: " << ec.message() << dendl;
+    } else {
+      ldout(ctx(), 4) << "frontend paused" << dendl;
+    }
+    ldout(ctx(), 4) << "frontend outstanding requests have completed" << dendl;
+    pause_mutex.unlock();
+  }
+
   // close all connections
   connections.close(ec);
   pause_mutex.cancel();
@@ -1100,15 +1195,23 @@ void AsioFrontend::join()
 
 void AsioFrontend::pause()
 {
-  ldout(ctx(), 4) << "frontend pausing connections..." << dendl;
+  ldout(ctx(), 4) << "frontend pausing, closing connections..." << dendl;
 
   // cancel pending calls to accept(), but don't close the sockets
   boost::system::error_code ec;
   for (auto& l : listeners) {
     l.acceptor.cancel(ec);
+    // signal cancellation of accept()
+    l.signal.emit(boost::asio::cancellation_type::terminal);
   }
 
-  // pause and wait for outstanding requests to complete
+  const bool graceful_stop{ g_ceph_context->_conf->rgw_graceful_stop };
+  if (!graceful_stop) {
+    // close all connections so outstanding requests fail quickly
+    connections.close(ec);
+  }
+
+  // pause and wait until outstanding requests complete
   pause_mutex.lock(ec);
 
   if (ec) {
@@ -1125,10 +1228,12 @@ void AsioFrontend::unpause()
 
   // start accepting connections again
   for (auto& l : listeners) {
-    l.acceptor.async_accept(l.socket,
-                            [this, &l] (boost::system::error_code ec) {
-                              accept(l, ec);
-                            });
+    boost::asio::spawn(context,
+      [this, &l] (boost::asio::yield_context yield) mutable {
+        accept(l, yield);
+      }, bind_cancellation_slot(l.signal.slot(),
+             bind_executor(context, boost::asio::detached)));
+
   }
 
   ldout(ctx(), 4) << "frontend unpaused" << dendl;

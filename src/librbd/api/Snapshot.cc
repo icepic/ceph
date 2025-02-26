@@ -15,6 +15,8 @@
 
 #include <boost/variant.hpp>
 
+#include <shared_mutex> // for std::shared_lock
+
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
 #define dout_prefix *_dout << "librbd::api::Snapshot: " << __func__ << ": "
@@ -82,10 +84,10 @@ public:
 
 class GetTrashVisitor {
 public:
-  std::string* original_name;
+  snap_trash_namespace_t *trash_snap;
 
-  explicit GetTrashVisitor(std::string* original_name)
-    : original_name(original_name) {
+  explicit GetTrashVisitor(snap_trash_namespace_t *trash_snap)
+    : trash_snap(trash_snap) {
   }
 
   template <typename T>
@@ -95,7 +97,9 @@ public:
 
   inline int operator()(
       const cls::rbd::TrashSnapshotNamespace& snap_namespace) {
-    *original_name = snap_namespace.original_name;
+    trash_snap->original_namespace_type = static_cast<snap_namespace_type_t>(
+      snap_namespace.original_snapshot_namespace_type);
+    trash_snap->original_name = snap_namespace.original_name;
     return 0;
   }
 };
@@ -153,7 +157,7 @@ int Snapshot<I>::get_group_namespace(I *ictx, uint64_t snap_id,
 
 template <typename I>
 int Snapshot<I>::get_trash_namespace(I *ictx, uint64_t snap_id,
-                                     std::string* original_name) {
+                                     snap_trash_namespace_t *trash_snap) {
   int r = ictx->state->refresh_if_required();
   if (r < 0) {
     return r;
@@ -165,7 +169,7 @@ int Snapshot<I>::get_trash_namespace(I *ictx, uint64_t snap_id,
     return -ENOENT;
   }
 
-  auto visitor = GetTrashVisitor(original_name);
+  auto visitor = GetTrashVisitor(trash_snap);
   r = snap_info->snap_namespace.visit(visitor);
   if (r < 0) {
     return r;

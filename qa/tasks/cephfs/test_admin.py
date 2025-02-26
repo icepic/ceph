@@ -4,6 +4,7 @@ import logging
 import uuid
 from io import StringIO
 from os.path import join as os_path_join
+import re
 from time import sleep
 
 from teuthology.exceptions import CommandFailedError
@@ -16,23 +17,88 @@ from tasks.cephfs.caps_helper import (CapTester, gen_mon_cap_str,
                                       gen_osd_cap_str, gen_mds_cap_str)
 
 log = logging.getLogger(__name__)
+MDS_RESTART_GRACE = 60
 
 class TestLabeledPerfCounters(CephFSTestCase):
     CLIENTS_REQUIRED = 2
     MDSS_REQUIRED = 1
 
-    def test_per_client_labeled_perf_counters(self):
-        """
-        That the per-client labelled perf counters depict the clients
-        performaing IO.
-        """
-        def get_counters_for(filesystem, client_id):
-            dump = self.fs.rank_tell(["counter", "dump"])
-            per_client_metrics_key = f'mds_client_metrics-{filesystem}'
-            counters = [c["counters"] for \
-                        c in dump[per_client_metrics_key] if c["labels"]["client"] == client_id]
-            return counters[0]
+    def _get_counters_for(self, filesystem, client_id):
+        dump = self.fs.rank_tell(["counter", "dump"])
+        per_client_metrics_key = f'mds_client_metrics-{filesystem}'
+        counters = [c["counters"] for \
+                    c in dump[per_client_metrics_key] if c["labels"]["client"] == client_id]
+        return counters[0]
 
+    def test_per_client_labeled_perf_counters_on_client_disconnect(self):
+        """
+        That the per-client labelled metrics are unavailable during client disconnect
+        """
+        mount_a_id = f'client.{self.mount_a.get_global_id()}'
+        self.mount_a.teardown()
+        with safe_while(sleep=1, tries=30, action=f'wait for counters - {mount_a_id}') as proceed:
+            while proceed():
+                dump = self.fs.rank_tell(["counter", "dump"])
+                per_client_metrics_key = f"mds_client_metrics-{dump['mds_client_metrics'][0]['labels']['fs_name']}"
+                clients = [c["labels"]["client"] for c in dump.get(per_client_metrics_key, {})]
+                if clients and mount_a_id not in clients:
+                    # success, no metrics.
+                    return True
+
+    def test_per_client_labeled_perf_counters_on_client_reconnect(self):
+        """
+        That the per-client labelled metrics are generated during client reconnect
+        """
+        # fail active mds and wait for reconnect
+        mds = self.fs.get_active_names()[0]
+        self.mds_cluster.mds_fail(mds)
+        self.fs.wait_for_state('up:active', rank=0, timeout=MDS_RESTART_GRACE)
+        mount_a_id = f'client.{self.mount_a.get_global_id()}'
+        mount_b_id = f'client.{self.mount_b.get_global_id()}'
+        fs_suffix = ""
+
+        with safe_while(sleep=1, tries=30, action='wait for counters') as proceed:
+            while proceed():
+                dump = self.fs.rank_tell(["counter", "dump"])
+                fs_suffix = dump['mds_client_metrics'][0]['labels']['fs_name']
+                per_client_metrics_key = f"mds_client_metrics-{fs_suffix}"
+                clients = [c["labels"]["client"] for c in dump.get(per_client_metrics_key, {})]
+                if mount_a_id in clients and mount_b_id in clients:
+                    # success, got metrics.
+                    break # break to continue the test
+
+        # Post reconnecting, validate the io perf counters
+        # write workload
+        self.mount_a.create_n_files("test_dir/test_file", 1000, sync=True)
+        with safe_while(sleep=1, tries=30, action=f'wait for counters - {mount_a_id}') as proceed:
+            while proceed():
+                counters_dump_a = self._get_counters_for(fs_suffix, mount_a_id)
+                if counters_dump_a["total_write_ops"] > 0 and counters_dump_a["total_write_size"] > 0 and \
+                   counters_dump_a["avg_write_latency"] >= 0 and counters_dump_a["avg_metadata_latency"] >= 0 and  \
+                   counters_dump_a["opened_files"] >= 0 and counters_dump_a["opened_inodes"] > 0 and \
+                   counters_dump_a["cap_hits"] > 0 and counters_dump_a["dentry_lease_hits"] > 0 and \
+                   counters_dump_a["pinned_icaps"] > 0:
+                    break # break to continue the test
+
+        # read from the other client
+        for i in range(100):
+            self.mount_b.open_background(basename=f'test_dir/test_file_{i}', write=False)
+        with safe_while(sleep=1, tries=30, action=f'wait for counters - {mount_b_id}') as proceed:
+            while proceed():
+                counters_dump_b = self._get_counters_for(fs_suffix, mount_b_id)
+                if counters_dump_b["total_read_ops"] >= 0 and counters_dump_b["total_read_size"] >= 0 and \
+                   counters_dump_b["avg_read_latency"] >= 0 and counters_dump_b["avg_metadata_latency"] >= 0 and \
+                   counters_dump_b["opened_files"] >= 0 and counters_dump_b["opened_inodes"] >= 0 and \
+                   counters_dump_b["cap_hits"] > 0 and counters_dump_a["dentry_lease_hits"] > 0 and \
+                   counters_dump_b["pinned_icaps"] > 0:
+                    break # break to continue the test
+        self.mount_a.teardown()
+        self.mount_b.teardown()
+
+    def test_per_client_labeled_perf_counters_io(self):
+        """
+        That the per-client labelled perf counters depict the clients performing IO.
+        """
         # sleep a bit so that we get updated clients...
         sleep(10)
 
@@ -53,21 +119,29 @@ class TestLabeledPerfCounters(CephFSTestCase):
         # write workload
         self.mount_a.create_n_files("test_dir/test_file", 1000, sync=True)
         with safe_while(sleep=1, tries=30, action=f'wait for counters - {mount_a_id}') as proceed:
-            counters_dump_a = get_counters_for(fs_suffix, mount_a_id)
             while proceed():
-                if counters_dump_a["total_write_ops"] > 0 and counters_dump_a["total_write_size"] > 0:
-                    return True
+                counters_dump_a = self._get_counters_for(fs_suffix, mount_a_id)
+                if counters_dump_a["total_write_ops"] > 0 and counters_dump_a["total_write_size"] > 0 and \
+                   counters_dump_a["avg_write_latency"] >= 0 and counters_dump_a["avg_metadata_latency"] >= 0 and  \
+                   counters_dump_a["opened_files"] >= 0 and counters_dump_a["opened_inodes"] > 0 and \
+                   counters_dump_a["cap_hits"] > 0 and counters_dump_a["dentry_lease_hits"] > 0 and \
+                   counters_dump_a["pinned_icaps"] > 0:
+                    break # break to continue the test
 
         # read from the other client
         for i in range(100):
             self.mount_b.open_background(basename=f'test_dir/test_file_{i}', write=False)
         with safe_while(sleep=1, tries=30, action=f'wait for counters - {mount_b_id}') as proceed:
-            counters_dump_b = get_counters_for(fs_suffix, mount_b_id)
             while proceed():
-                if counters_dump_b["total_read_ops"] > 0 and counters_dump_b["total_read_size"] > 0:
-                    return True
-
-        self.fs.teardown()
+                counters_dump_b = self._get_counters_for(fs_suffix, mount_b_id)
+                if counters_dump_b["total_read_ops"] >= 0 and counters_dump_b["total_read_size"] >= 0 and \
+                   counters_dump_b["avg_read_latency"] >= 0 and counters_dump_b["avg_metadata_latency"] >= 0 and \
+                   counters_dump_b["opened_files"] >= 0 and counters_dump_b["opened_inodes"] >= 0 and \
+                   counters_dump_b["cap_hits"] > 0 and counters_dump_a["dentry_lease_hits"] > 0 and \
+                   counters_dump_b["pinned_icaps"] > 0:
+                    break # break to continue the test
+        self.mount_a.teardown()
+        self.mount_b.teardown()
 
 class TestAdminCommands(CephFSTestCase):
     """
@@ -91,37 +165,130 @@ class TestAdminCommands(CephFSTestCase):
         if overwrites:
             self.run_ceph_cmd('osd', 'pool', 'set', n+"-data", 'allow_ec_overwrites', 'true')
 
-    def _get_unhealthy_mds_id(self, health_report, health_warn):
-        '''
-        Return MDS ID for which health warning in "health_warn" has been
-        generated.
-        '''
-        # variable "msg" should hold string something like this -
-        # 'mds.b(mds.0): Behind on trimming (865/10) max_segments: 10,
-        # num_segments: 86
-        msg = health_report['checks'][health_warn]['detail'][0]['message']
-        mds_id = msg.split('(')[0]
-        mds_id = mds_id.replace('mds.', '')
-        return mds_id
+    def gen_health_warn_mds_cache_oversized(self):
+        health_warn = 'MDS_CACHE_OVERSIZED'
 
-    def wait_till_health_warn(self, health_warn, active_mds_id, sleep=3,
-                              tries=10):
-        errmsg = (f'Expected health warning "{health_warn}" to eventually '
-                  'show up in output of command "ceph health detail". Tried '
-                  f'{tries} times with interval of {sleep} seconds but the '
-                  'health warning didn\'t turn up.')
+        self.config_set('mds', 'mds_cache_memory_limit', '1K')
+        self.config_set('mds', 'mds_health_cache_threshold', '1.00000')
+        self.mount_a.open_n_background('.', 400)
 
-        with safe_while(sleep=sleep, tries=tries, action=errmsg) as proceed:
+        self.wait_for_health(health_warn, 30)
+
+    def gen_health_warn_mds_trim(self):
+        health_warn = 'MDS_TRIM'
+
+        # for generating health warning MDS_TRIM
+        self.config_set('mds', 'mds_debug_subtrees', 'true')
+        # this will really really slow the trimming, so that MDS_TRIM stays
+        # for longer.
+        self.config_set('mds', 'mds_log_trim_decay_rate', '60')
+        self.config_set('mds', 'mds_log_trim_threshold', '1')
+        self.mount_a.open_n_background('.', 400)
+
+        self.wait_for_health(health_warn, 30)
+
+
+class TestMdsLastSeen(CephFSTestCase):
+    """
+    Tests for `mds last-seen` command.
+    """
+
+    MDSS_REQUIRED = 2
+
+    def test_in_text(self):
+        """
+        That `mds last-seen` returns 0 for an MDS currently in the map.
+        """
+
+        status = self.fs.status()
+        r0 = self.fs.get_rank(0, status=status)
+        s = self.get_ceph_cmd_stdout("mds", "last-seen", r0['name'])
+        seconds = int(re.match(r"^(\d+)s$", s).group(1))
+        self.assertEqual(seconds, 0)
+
+    def test_in_json(self):
+        """
+        That `mds last-seen` returns 0 for an MDS currently in the map.
+        """
+
+        status = self.fs.status()
+        r0 = self.fs.get_rank(0, status=status)
+        s = self.get_ceph_cmd_stdout("--format=json", "mds", "last-seen", r0['name'])
+        J = json.loads(s)
+        seconds = int(re.match(r"^(\d+)s$", J['last-seen']).group(1))
+        self.assertEqual(seconds, 0)
+
+    def test_unknown(self):
+        """
+        That `mds last-seen` returns ENOENT for an mds not in recent maps.
+        """
+
+        try:
+            self.get_ceph_cmd_stdout("--format=json", "mds", "last-seen", 'foo')
+        except CommandFailedError as e:
+            self.assertEqual(e.exitstatus, errno.ENOENT)
+        else:
+            self.fail("non-existent mds should fail ENOENT")
+
+    def test_standby(self):
+        """
+        That `mds last-seen` returns 0 for a standby.
+        """
+
+        status = self.fs.status()
+        for info in status.get_standbys():
+            s = self.get_ceph_cmd_stdout("--format=json", "mds", "last-seen", info['name'])
+            J = json.loads(s)
+            seconds = int(re.match(r"^(\d+)s$", J['last-seen']).group(1))
+            self.assertEqual(seconds, 0)
+
+    def test_stopped(self):
+        """
+        That `mds last-seen` returns >0 for mds that is stopped.
+        """
+
+        status = self.fs.status()
+        r0 = self.fs.get_rank(0, status=status)
+        self.fs.mds_stop(mds_id=r0['name'])
+        self.fs.rank_fail()
+        sleep(2)
+        with safe_while(sleep=1, tries=self.fs.beacon_timeout, action='wait for last-seen >0') as proceed:
             while proceed():
-                self.get_ceph_cmd_stdout(
-                    f'tell mds.{active_mds_id} cache status')
+                s = self.get_ceph_cmd_stdout("--format=json", "mds", "last-seen", r0['name'])
+                J = json.loads(s)
+                seconds = int(re.match(r"^(\d+)s$", J['last-seen']).group(1))
+                if seconds == 0:
+                    continue
+                self.assertGreater(seconds, 1)
+                break
 
-                health_report = json.loads(self.get_ceph_cmd_stdout(
-                    'health detail --format json'))
+    def test_gc(self):
+        """
+        That historical mds information is eventually garbage collected.
+        """
 
-                if health_warn in health_report['checks']:
-                    return
-
+        prune_time = 20
+        sleep_time = 2
+        self.config_set('mon', 'mon_fsmap_prune_threshold', prune_time)
+        status = self.fs.status()
+        r0 = self.fs.get_rank(0, status=status)
+        self.fs.mds_stop(mds_id=r0['name'])
+        self.fs.rank_fail()
+        last = 0
+        for i in range(prune_time):
+            sleep(sleep_time) # we will sleep twice prune_time
+            try:
+                s = self.get_ceph_cmd_stdout("--format=json", "mds", "last-seen", r0['name'])
+                J = json.loads(s)
+                seconds = int(re.match(r"^(\d+)s$", J['last-seen']).group(1))
+                self.assertGreater(seconds, last)
+                log.debug("last_seen: %ds", seconds)
+                last = seconds
+            except CommandFailedError as e:
+                self.assertEqual(e.exitstatus, errno.ENOENT)
+                self.assertGreaterEqual(last + sleep_time + 1, prune_time) # rounding error add 1
+                return
+        self.fail("map was no garbage collected as expected")
 
 @classhook('_add_valid_tell')
 class TestValidTell(TestAdminCommands):
@@ -157,6 +324,8 @@ class TestFsStatus(TestAdminCommands):
     Test "ceph fs status subcommand.
     """
 
+    MDSS_REQUIRED = 3
+
     def test_fs_status(self):
         """
         That `ceph fs status` command functions.
@@ -170,6 +339,31 @@ class TestFsStatus(TestAdminCommands):
 
         mdsmap = json.loads(self.get_ceph_cmd_stdout("fs", "status", "--format=json"))["mdsmap"]
         self.assertEqual(mdsmap[0]["state"], "active")
+
+    def test_fs_status_standby_replay(self):
+        """
+        That `ceph fs status` command functions.
+        """
+
+        self.fs.set_allow_standby_replay(True)
+
+        s = self.get_ceph_cmd_stdout("fs", "status")
+        self.assertTrue("active" in s)
+        self.assertTrue("standby-replay" in s)
+        self.assertTrue("0-s" in s)
+        self.assertTrue("standby" in s)
+
+        mdsmap = json.loads(self.get_ceph_cmd_stdout("fs", "status", "--format=json-pretty"))["mdsmap"]
+        self.assertEqual(mdsmap[0]["state"], "active")
+        self.assertEqual(mdsmap[1]["state"], "standby-replay")
+        self.assertEqual(mdsmap[1]["rank"], "0-s")
+        self.assertEqual(mdsmap[2]["state"], "standby")
+
+        mdsmap = json.loads(self.get_ceph_cmd_stdout("fs", "status", "--format=json"))["mdsmap"]
+        self.assertEqual(mdsmap[0]["state"], "active")
+        self.assertEqual(mdsmap[1]["state"], "standby-replay")
+        self.assertEqual(mdsmap[1]["rank"], "0-s")
+        self.assertEqual(mdsmap[2]["state"], "standby")
 
 
 class TestAddDataPool(TestAdminCommands):
@@ -715,10 +909,12 @@ class TestRenameCommand(TestAdminCommands):
         self.run_ceph_cmd(f'fs fail {self.fs.name}')
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session true')
         sleep(5)
+
         self.run_ceph_cmd(f'fs rename {orig_fs_name} {new_fs_name} --yes-i-really-mean-it')
+
         self.run_ceph_cmd(f'fs set {new_fs_name} joinable true')
         self.run_ceph_cmd(f'fs set {new_fs_name} refuse_client_session false')
-        sleep(5)
+        self.fs.wait_for_daemons()
 
         # authorize a cephx ID access to the renamed file system.
         # use the ID to write to the file system.
@@ -754,11 +950,13 @@ class TestRenameCommand(TestAdminCommands):
         self.run_ceph_cmd(f'fs fail {self.fs.name}')
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session true')
         sleep(5)
+
         self.run_ceph_cmd(f'fs rename {orig_fs_name} {new_fs_name} --yes-i-really-mean-it')
         self.run_ceph_cmd(f'fs rename {orig_fs_name} {new_fs_name} --yes-i-really-mean-it')
+
         self.run_ceph_cmd(f'fs set {new_fs_name} joinable true')
         self.run_ceph_cmd(f'fs set {new_fs_name} refuse_client_session false')
-        sleep(5)
+        self.fs.wait_for_daemons()
 
         # original file system name does not appear in `fs ls` command
         self.assertFalse(self.fs.exists())
@@ -777,13 +975,16 @@ class TestRenameCommand(TestAdminCommands):
         new_fs_name = 'new_cephfs'
         data_pool = self.fs.get_data_pool_name()
         metadata_pool = self.fs.get_metadata_pool_name()
+
         self.run_ceph_cmd(f'fs fail {self.fs.name}')
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session true')
         sleep(5)
+
         self.run_ceph_cmd(f'fs rename {orig_fs_name} {new_fs_name} --yes-i-really-mean-it')
+
         self.run_ceph_cmd(f'fs set {new_fs_name} joinable true')
         self.run_ceph_cmd(f'fs set {new_fs_name} refuse_client_session false')
-        sleep(5)
+        self.fs.wait_for_daemons()
 
         try:
             self.run_ceph_cmd(f"fs new {orig_fs_name} {metadata_pool} {data_pool}")
@@ -820,9 +1021,13 @@ class TestRenameCommand(TestAdminCommands):
         """
         That renaming a file system without '--yes-i-really-mean-it' flag fails.
         """
+        # Failing the file system breaks this mount
+        self.mount_a.umount_wait(require_clean=True)
+
         self.run_ceph_cmd(f'fs fail {self.fs.name}')
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session true')
         sleep(5)
+
         try:
             self.run_ceph_cmd(f"fs rename {self.fs.name} new_fs")
         except CommandFailedError as ce:
@@ -832,25 +1037,31 @@ class TestRenameCommand(TestAdminCommands):
         else:
             self.fail("expected renaming of file system without the "
                       "'--yes-i-really-mean-it' flag to fail ")
+
         self.run_ceph_cmd(f'fs set {self.fs.name} joinable true')
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session false')
+        self.fs.wait_for_daemons()
 
     def test_fs_rename_fails_for_non_existent_fs(self):
         """
         That renaming a non-existent file system fails.
         """
-        self.skipTest('This test is broken ATM; see '
-                      'https://tracker.ceph.com/issues/66088')
+        # Failing the file system breaks this mount
+        self.mount_a.umount_wait(require_clean=True)
 
         self.run_ceph_cmd(f'fs fail {self.fs.name}')
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session true')
         sleep(5)
+
         try:
             self.run_ceph_cmd("fs rename non_existent_fs new_fs --yes-i-really-mean-it")
         except CommandFailedError as ce:
             self.assertEqual(ce.exitstatus, errno.ENOENT, "invalid error code on renaming a non-existent fs")
         else:
             self.fail("expected renaming of a non-existent file system to fail")
+        self.run_ceph_cmd(f'fs set {self.fs.name} joinable true')
+        self.fs.wait_for_daemons()
+        self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session false')
 
     def test_fs_rename_fails_new_name_already_in_use(self):
         """
@@ -858,9 +1069,13 @@ class TestRenameCommand(TestAdminCommands):
         """
         self.fs2 = self.mds_cluster.newfs(name='cephfs2', create=True)
 
+        # let's unmount the client before failing the FS
+        self.mount_a.umount_wait(require_clean=True)
+
         self.run_ceph_cmd(f'fs fail {self.fs.name}')
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session true')
         sleep(5)
+
         try:
             self.run_ceph_cmd(f"fs rename {self.fs.name} {self.fs2.name} --yes-i-really-mean-it")
         except CommandFailedError as ce:
@@ -868,8 +1083,10 @@ class TestRenameCommand(TestAdminCommands):
                              "invalid error code on renaming to a fs name that is already in use")
         else:
             self.fail("expected renaming to a new file system name that is already in use to fail.")
+
         self.run_ceph_cmd(f'fs set {self.fs.name} joinable true')
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session false')
+        self.fs.wait_for_daemons()
 
     def test_fs_rename_fails_with_mirroring_enabled(self):
         """
@@ -878,19 +1095,25 @@ class TestRenameCommand(TestAdminCommands):
         orig_fs_name = self.fs.name
         new_fs_name = 'new_cephfs'
 
+        # let's unmount the client before failing the FS
+        self.mount_a.umount_wait(require_clean=True)
+
         self.run_ceph_cmd(f'fs mirror enable {orig_fs_name}')
         self.run_ceph_cmd(f'fs fail {self.fs.name}')
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session true')
         sleep(5)
+
         try:
             self.run_ceph_cmd(f'fs rename {orig_fs_name} {new_fs_name} --yes-i-really-mean-it')
         except CommandFailedError as ce:
             self.assertEqual(ce.exitstatus, errno.EPERM, "invalid error code on renaming a mirrored file system")
         else:
             self.fail("expected renaming of a mirrored file system to fail")
+
         self.run_ceph_cmd(f'fs mirror disable {orig_fs_name}')
         self.run_ceph_cmd(f'fs set {self.fs.name} joinable true')
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session false')
+        self.fs.wait_for_daemons()
 
     def test_rename_when_fs_is_online(self):
         '''
@@ -901,6 +1124,7 @@ class TestRenameCommand(TestAdminCommands):
         new_fs_name = 'new_cephfs'
 
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session true')
+
         self.negtest_ceph_cmd(
             args=(f'fs rename {self.fs.name} {new_fs_name} '
                    '--yes-i-really-mean-it'),
@@ -908,6 +1132,7 @@ class TestRenameCommand(TestAdminCommands):
                       "renaming a CephFS, it must be marked as down. See "
                       "`ceph fs fail`."),
             retval=errno.EPERM)
+
         self.run_ceph_cmd(f'fs set {self.fs.name} refuse_client_session false')
 
         self.fs.getinfo()
@@ -932,6 +1157,7 @@ class TestRenameCommand(TestAdminCommands):
         self.mount_a.umount_wait(require_clean=True)
 
         self.run_ceph_cmd(f'fs fail {self.fs.name}')
+
         self.negtest_ceph_cmd(
             args=f"fs rename {self.fs.name} new_fs --yes-i-really-mean-it",
             errmsgs=(f"CephFS '{self.fs.name}' doesn't refuse clients. "
@@ -939,6 +1165,7 @@ class TestRenameCommand(TestAdminCommands):
                       "'refuse_client_session' must be set. See "
                       "`ceph fs set`."),
             retval=errno.EPERM)
+
         self.run_ceph_cmd(f'fs fail {self.fs.name}')
 
 
@@ -1610,10 +1837,9 @@ class TestFsAuthorize(CephFSTestCase):
         That fs authorize command works on filesystems with names having [_.-]
         characters
         """
-        self.skipTest('this test is broken ATM, see: '
-                      'https://tracker.ceph.com/issues/66077')
-
         self.mount_a.umount_wait(require_clean=True)
+        # let's unmount both client before deleting the FS
+        self.mount_b.umount_wait(require_clean=True)
         self.mds_cluster.delete_all_filesystems()
         fs_name = "cephfs-_."
         self.fs = self.mds_cluster.newfs(name=fs_name)
@@ -1630,6 +1856,28 @@ class TestFsAuthorize(CephFSTestCase):
 
         self._remount(keyring)
         self.captester.run_mds_cap_tests(PERM)
+
+    def test_fs_read_and_single_path_rw(self):
+        """
+        Tests the file creation using 'touch' cmd on a specific path
+        which has 'rw' caps and 'r' caps on the rest of the fs.
+
+        The mds auth caps with 'rw' caps on a specific path and 'r' caps
+        on the rest of the fs has an issue. The file creation using 'touch'
+        cmd on the fuse client used to fail while doing setattr.
+        Please see https://tracker.ceph.com/issues/67212
+
+        The new file creation test using 'touch' cmd is added to
+        'MdsCapTester.run_mds_cap_tests' which eventually gets
+        called by '_remount_and_run_tests'
+        """
+        FS_AUTH_CAPS = (('/', 'r'), ('/dir2', 'rw'))
+        self.mount_a.run_shell('mkdir -p ./dir2')
+        self.captesters = (CapTester(self.mount_a, '/'),
+                           CapTester(self.mount_a, '/dir2'))
+        keyring = self.fs.authorize(self.client_id, FS_AUTH_CAPS)
+
+        self._remount_and_run_tests(FS_AUTH_CAPS, keyring)
 
     def test_multiple_path_r(self):
         PERM = 'r'
@@ -1957,9 +2205,6 @@ class TestFsAuthorizeUpdate(CephFSTestCase):
                 caps mon = "allow r fsname=a"
                 caps osd = "allow rw tag cephfs data=a"
         """
-        self.skipTest('this test is broken ATM, see '
-                      'https://tracker.ceph.com/issues/65808')
-
         PERM, PATH = 'rw', 'dir1'
         self.mount_a.run_shell(f'mkdir {PATH}')
         self.captester = CapTester(self.mount_a, PATH)
@@ -2298,24 +2543,18 @@ class TestFSFail(TestAdminCommands):
     MDSS_REQUIRED = 2
     CLIENTS_REQUIRED = 1
 
-    def test_with_health_warn_oversize_cache(self):
+    def test_with_health_warn_cache_oversized(self):
         '''
         Test that, when health warning MDS_CACHE_OVERSIZE is present for an
         MDS, command "ceph fs fail" fails without confirmation flag and passes
         when confirmation flag is passed.
         '''
         health_warn = 'MDS_CACHE_OVERSIZED'
-        self.config_set('mds', 'mds_cache_memory_limit', '1K')
-        self.config_set('mds', 'mds_health_cache_threshold', '1.00000')
-        active_mds_id = self.fs.get_active_names()[0]
-
-        self.mount_a.open_n_background('.', 400)
-        self.wait_till_health_warn(health_warn, active_mds_id)
+        self.gen_health_warn_mds_cache_oversized()
 
         # actual testing begins now.
-        errmsg = 'mds_cache_oversized'
         self.negtest_ceph_cmd(args=f'fs fail {self.fs.name}',
-                              retval=1, errmsgs=errmsg)
+                              retval=1, errmsgs=health_warn)
         self.run_ceph_cmd(f'fs fail {self.fs.name} --yes-i-really-mean-it')
 
         # Bring and wait for MDS to be up since it is needed for unmounting
@@ -2330,21 +2569,11 @@ class TestFSFail(TestAdminCommands):
         confirmation flag is passed.
         '''
         health_warn = 'MDS_TRIM'
-        # for generating health warning MDS_TRIM
-        self.config_set('mds', 'mds_debug_subtrees', 'true')
-        # this will really really slow the trimming, so that MDS_TRIM stays
-        # for longer.
-        self.config_set('mds', 'mds_log_trim_decay_rate', '60')
-        self.config_set('mds', 'mds_log_trim_threshold', '1')
-        active_mds_id = self.fs.get_active_names()[0]
-
-        self.mount_a.open_n_background('.', 400)
-        self.wait_till_health_warn(health_warn, active_mds_id)
+        self.gen_health_warn_mds_trim()
 
         # actual testing begins now.
-        errmsg = 'mds_trim'
         self.negtest_ceph_cmd(args=f'fs fail {self.fs.name}',
-                              retval=1, errmsgs=errmsg)
+                              retval=1, errmsgs=health_warn)
         self.run_ceph_cmd(f'fs fail {self.fs.name} --yes-i-really-mean-it')
 
         # Bring and wait for MDS to be up since it is needed for unmounting
@@ -2361,19 +2590,11 @@ class TestFSFail(TestAdminCommands):
         '''
         health_warn = 'MDS_CACHE_OVERSIZED'
         self.fs.set_max_mds(2)
-        self.config_set('mds', 'mds_cache_memory_limit', '1K')
-        self.config_set('mds', 'mds_health_cache_threshold', '1.00000')
-        self.fs.wait_for_daemons()
-        mds1_id, mds2_id = self.fs.get_active_names()
-
-        self.mount_a.open_n_background('.', 400)
-        # MDS ID for which health warning has been generated.
-        self.wait_till_health_warn(health_warn, mds1_id)
+        self.gen_health_warn_mds_cache_oversized()
 
         # actual testing begins now.
-        errmsg = 'mds_cache_oversized'
         self.negtest_ceph_cmd(args=f'fs fail {self.fs.name}',
-                              retval=1, errmsgs=errmsg)
+                              retval=1, errmsgs=health_warn)
         self.run_ceph_cmd(f'fs fail {self.fs.name} --yes-i-really-mean-it')
 
         # Bring and wait for MDS to be up since it is needed for unmounting
@@ -2387,25 +2608,20 @@ class TestMDSFail(TestAdminCommands):
     MDSS_REQUIRED = 2
     CLIENTS_REQUIRED = 1
 
-    def test_with_health_warn_oversize_cache(self):
+    def test_with_health_warn_cache_oversized(self):
         '''
         Test that, when health warning MDS_CACHE_OVERSIZE is present for an
         MDS, command "ceph mds fail" fails without confirmation flag and
         passes when confirmation flag is passed.
         '''
         health_warn = 'MDS_CACHE_OVERSIZED'
-        self.config_set('mds', 'mds_cache_memory_limit', '1K')
-        self.config_set('mds', 'mds_health_cache_threshold', '1.00000')
-        active_mds_id = self.fs.get_active_names()[0]
-
-        self.mount_a.open_n_background('.', 400)
-        self.wait_till_health_warn(health_warn, active_mds_id)
+        self.gen_health_warn_mds_cache_oversized()
 
         # actual testing begins now.
-        errmsg = 'mds_cache_oversized'
+        active_mds_id = self.fs.get_active_names()[0]
         self.negtest_ceph_cmd(args=f'mds fail {active_mds_id}',
-                              retval=1, errmsgs=errmsg)
-        self.run_ceph_cmd(f'mds fail {self.fs.name} --yes-i-really-mean-it')
+                              retval=1, errmsgs=health_warn)
+        self.run_ceph_cmd(f'mds fail {active_mds_id} --yes-i-really-mean-it')
 
     def test_with_health_warn_trim(self):
         '''
@@ -2414,22 +2630,28 @@ class TestMDSFail(TestAdminCommands):
         confirmation is passed.
         '''
         health_warn = 'MDS_TRIM'
-        # for generating health warning MDS_TRIM
-        self.config_set('mds', 'mds_debug_subtrees', 'true')
-        # this will really really slow the trimming, so that MDS_TRIM stays
-        # for longer.
-        self.config_set('mds', 'mds_log_trim_decay_rate', '60')
-        self.config_set('mds', 'mds_log_trim_threshold', '1')
-        active_mds_id = self.fs.get_active_names()[0]
-
-        self.mount_a.open_n_background('.', 400)
-        self.wait_till_health_warn(health_warn, active_mds_id)
+        self.gen_health_warn_mds_trim()
 
         # actual testing begins now...
-        errmsg = 'mds_trim'
+        active_mds_id = self.fs.get_active_names()[0]
         self.negtest_ceph_cmd(args=f'mds fail {active_mds_id}',
-                              retval=1, errmsgs=errmsg)
-        self.run_ceph_cmd(f'mds fail {self.fs.name} --yes-i-really-mean-it')
+                              retval=1, errmsgs=health_warn)
+        self.run_ceph_cmd(f'mds fail {active_mds_id} --yes-i-really-mean-it')
+
+    def _get_unhealthy_mds_id(self, health_warn):
+        '''
+        Return MDS ID for which health warning in "health_warn" has been
+        generated.
+        '''
+        health_report = json.loads(self.get_ceph_cmd_stdout('health detail '
+                                                            '--format json'))
+        # variable "msg" should hold string something like this -
+        # 'mds.b(mds.0): Behind on trimming (865/10) max_segments: 10,
+        # num_segments: 86
+        msg = health_report['checks'][health_warn]['detail'][0]['message']
+        mds_id = msg.split('(')[0]
+        mds_id = mds_id.replace('mds.', '')
+        return mds_id
 
     def test_with_health_warn_with_2_active_MDSs(self):
         '''
@@ -2440,18 +2662,11 @@ class TestMDSFail(TestAdminCommands):
         '''
         health_warn = 'MDS_CACHE_OVERSIZED'
         self.fs.set_max_mds(2)
-        self.config_set('mds', 'mds_cache_memory_limit', '1K')
-        self.config_set('mds', 'mds_health_cache_threshold', '1.00000')
-        self.fs.wait_for_daemons()
+        self.gen_health_warn_mds_cache_oversized()
         mds1_id, mds2_id = self.fs.get_active_names()
 
-        self.mount_a.open_n_background('.', 400)
-        self.wait_till_health_warn(health_warn, mds1_id)
-
-        health_report = json.loads(self.get_ceph_cmd_stdout('health detail '
-                                                            '--format json'))
         # MDS ID for which health warning has been generated.
-        hw_mds_id = self._get_unhealthy_mds_id(health_report, health_warn)
+        hw_mds_id = self._get_unhealthy_mds_id(health_warn)
         if mds1_id == hw_mds_id:
             non_hw_mds_id = mds2_id
         elif mds2_id == hw_mds_id:
@@ -2462,10 +2677,247 @@ class TestMDSFail(TestAdminCommands):
                                'than these two. This is definitely an error.')
 
         # actual testing begins now...
-        errmsg = 'mds_cache_oversized'
         self.negtest_ceph_cmd(args=f'mds fail {non_hw_mds_id}', retval=1,
-                              errmsgs=errmsg)
+                              errmsgs=health_warn)
         self.negtest_ceph_cmd(args=f'mds fail {hw_mds_id}', retval=1,
-                              errmsgs=errmsg)
-        self.run_ceph_cmd('mds fail mds1_id --yes-i-really-mean-it')
-        self.run_ceph_cmd('mds fail mds2_id --yes-i-really-mean-it')
+                              errmsgs=health_warn)
+        self.run_ceph_cmd(f'mds fail {mds1_id} --yes-i-really-mean-it')
+        self.run_ceph_cmd(f'mds fail {mds2_id} --yes-i-really-mean-it')
+
+
+class TestFSSetMaxMDS(TestAdminCommands):
+
+    def test_when_unhealthy_without_confirm(self):
+        '''
+        Test that command "ceph fs set <fsname> max_mds <num>" without the
+        confirmation flag (--yes-i-really-mean-it) fails when cluster is
+        unhealthy.
+        '''
+        self.gen_health_warn_mds_cache_oversized()
+
+        with self.assertRaises(CommandFailedError) as cfe:
+            self.fs.set_max_mds(2, confirm=False)
+        self.assertEqual(cfe.exception.exitstatus, errno.EPERM)
+
+    def test_when_unhealthy_with_confirm(self):
+        '''
+        Test that command "ceph fs set <fsname> max_mds <num>
+        --yes-i-really-mean-it" runs successfully when cluster is unhealthy.
+        '''
+        self.gen_health_warn_mds_cache_oversized()
+
+        self.fs.set_max_mds(2, confirm=True)
+        self.assertEqual(self.fs.get_var('max_mds'), 2)
+
+    def test_when_mds_trim_without_confirm(self):
+        '''
+        Test that command "ceph fs set <fsname> max_mds <num>" without the
+        confirmation flag (--yes-i-really-mean-it) fails when cluster has
+        MDS_TRIM health warning.
+        '''
+        self.gen_health_warn_mds_trim()
+
+        with self.assertRaises(CommandFailedError) as cfe:
+            self.fs.set_max_mds(2, confirm=False)
+        self.assertEqual(cfe.exception.exitstatus, errno.EPERM)
+
+    def test_when_mds_trim_when_with_confirm(self):
+        '''
+        Test that command "ceph fs set <fsname> max_mds <num>
+        --yes-i-really-mean-it" runs successfully when cluster has MDS_TRIM
+        health warning.
+        '''
+        self.gen_health_warn_mds_trim()
+
+        self.fs.set_max_mds(2, confirm=True)
+        self.assertEqual(self.fs.get_var('max_mds'), 2)
+
+    def test_when_healthy_with_confirm(self):
+        '''
+        Test that command "ceph fs set <fsname> max_mds <num>
+        --yes-i-really-mean-it" runs successfully also when cluster is
+        healthy.
+        '''
+        self.fs.set_max_mds(2, confirm=True)
+        self.assertEqual(self.fs.get_var('max_mds'), 2)
+
+
+class TestToggleVolumes(CephFSTestCase):
+    '''
+    Contains code for enabling/disabling mgr/volumes plugin.
+    '''
+
+    VOL_MOD_NAME = 'volumes'
+    CONFIRM = '--yes-i-really-mean-it'
+
+    def tearDown(self):
+        '''
+        Ensure that the volumes plugin is enabled after the test has finished
+        running since not doing so might affect tearDown() of CephFSTestCase or
+        other superclasses.
+        '''
+        json_output = self.get_ceph_cmd_stdout('mgr module ls --format json')
+        json_output = json.loads(json_output)
+
+        if 'volumes' in json_output['force_disabled_modules']:
+            self.run_ceph_cmd(f'mgr module enable {self.VOL_MOD_NAME}')
+
+        super(TestToggleVolumes, self).tearDown()
+
+    def test_force_disable_with_confirmation(self):
+        '''
+        Test that running "ceph mgr module force disable volumes
+        --yes-i-really-mean-it" successfully disables volumes plugin.
+
+        Also test "ceph mgr module ls" output after this.
+        '''
+        self.run_ceph_cmd(f'mgr module force disable {self.VOL_MOD_NAME} '
+                          f'{self.CONFIRM}')
+
+        json_output = self.get_ceph_cmd_stdout('mgr module ls --format json')
+        json_output = json.loads(json_output)
+
+        self.assertIn(self.VOL_MOD_NAME, json_output['always_on_modules'])
+        self.assertIn(self.VOL_MOD_NAME, json_output['force_disabled_modules'])
+
+        self.assertNotIn(self.VOL_MOD_NAME, json_output['enabled_modules'])
+        self.assertNotIn(self.VOL_MOD_NAME, json_output['disabled_modules'])
+
+    def test_force_disable_fails_without_confirmation(self):
+        '''
+        Test that running "ceph mgr module force disable volumes" fails with
+        EPERM when confirmation flag is not passed along.
+
+        Also test that output of this command suggests user to pass
+        --yes-i-really-mean-it.
+        '''
+        proc = self.run_ceph_cmd(
+            f'mgr module force disable {self.VOL_MOD_NAME}',
+            stderr=StringIO(), check_status=False)
+
+        self.assertEqual(proc.returncode, errno.EPERM)
+
+        proc_stderr = proc.stderr.getvalue()
+        self.assertIn('EPERM', proc_stderr)
+        # ensure that the confirmation flag was recommended
+        self.assertIn(self.CONFIRM, proc_stderr)
+
+    def test_force_disable_idempotency(self):
+        '''
+        Test that running "ceph mgr module force disable volumes" passes when
+        volumes plugin was already force disabled.
+        '''
+        self.run_ceph_cmd(f'mgr module force disable {self.VOL_MOD_NAME} '
+                          f'{self.CONFIRM}')
+        sleep(5)
+
+        json_output = self.get_ceph_cmd_stdout('mgr module ls --format '
+                                              'json-pretty')
+        json_output = json.loads(json_output)
+
+        self.assertIn(self.VOL_MOD_NAME, json_output['always_on_modules'])
+        self.assertIn(self.VOL_MOD_NAME, json_output['force_disabled_modules'])
+
+        self.assertNotIn(self.VOL_MOD_NAME, json_output['enabled_modules'])
+        self.assertNotIn(self.VOL_MOD_NAME, json_output['disabled_modules'])
+
+        # XXX: this this test, running this command 2nd time should pass.
+        self.run_ceph_cmd(f'mgr module force disable {self.VOL_MOD_NAME}')
+
+    def test_force_disable_nonexistent_mod(self):
+        '''
+        Test that passing non-existent name to "ceph mgr module force disable"
+        command leads to an error.
+        '''
+        proc = self.run_ceph_cmd(
+            f'mgr module force disable abcd {self.CONFIRM}',
+            check_status=False, stderr=StringIO())
+        self.assertEqual(proc.returncode, errno.EINVAL)
+        self.assertIn('EINVAL', proc.stderr.getvalue())
+
+    def test_force_disable_non_alwayson_mod(self):
+        '''
+        Test that passing non-existent name to "ceph mgr module force disable"
+        command leads to an error.
+        '''
+        json_output = self.get_ceph_cmd_stdout(
+            'mgr module ls --format json-pretty', check_status=False,
+            stderr=StringIO())
+        output_dict = json.loads(json_output)
+        some_non_alwayson_mod = output_dict['enabled_modules'][0]
+
+        proc = self.run_ceph_cmd(
+            f'mgr module force disable {some_non_alwayson_mod} {self.CONFIRM}',
+            check_status=False, stderr=StringIO())
+        self.assertEqual(proc.returncode, errno.EINVAL)
+        self.assertIn('EINVAL', proc.stderr.getvalue())
+
+    def test_enabled_by_default(self):
+        '''
+        Test that volumes plugin is enabled by default and is also reported as
+        "always on".
+        '''
+        json_output = self.get_ceph_cmd_stdout('mgr module ls --format json')
+        json_output = json.loads(json_output)
+
+        self.assertIn(self.VOL_MOD_NAME, json_output['always_on_modules'])
+
+        self.assertNotIn(self.VOL_MOD_NAME, json_output['enabled_modules'])
+        self.assertNotIn(self.VOL_MOD_NAME, json_output['disabled_modules'])
+        self.assertNotIn(self.VOL_MOD_NAME, json_output['force_disabled_modules'])
+
+    def test_disable_fails(self):
+        '''
+        Test that running "ceph mgr module disable volumes" fails with EPERM.
+
+        This is expected since volumes is an always-on module and therefore
+        it can only be disabled using command "ceph mgr module force disable
+        volumes".
+        '''
+        proc = self.run_ceph_cmd(f'mgr module disable {self.VOL_MOD_NAME}',
+                                 stderr=StringIO(), check_status=False)
+        self.assertEqual(proc.returncode, errno.EPERM)
+
+        proc_stderr = proc.stderr.getvalue()
+        self.assertIn('EPERM', proc_stderr)
+
+    def test_enable_idempotency(self):
+        '''
+        Test that enabling volumes plugin when it is already enabled doesn't
+        exit with non-zero return value.
+
+        Also test that it reports plugin as already enabled.
+        '''
+        proc = self.run_ceph_cmd(f'mgr module enable {self.VOL_MOD_NAME}',
+                                 stderr=StringIO())
+        self.assertEqual(proc.returncode, 0)
+
+        proc_stderr = proc.stderr.getvalue()
+        self.assertIn('already enabled', proc_stderr)
+        self.assertIn('always-on', proc_stderr)
+
+    def test_enable_post_disabling(self):
+        '''
+        Test that enabling volumes plugin after (force-)disabling it works
+        successfully.
+
+        Alo test "ceph mgr module ls" output for volumes plugin afterwards.
+        '''
+        self.run_ceph_cmd(f'mgr module force disable {self.VOL_MOD_NAME} '
+                          f'{self.CONFIRM}')
+        # give bit of time for plugin to be disabled.
+        sleep(5)
+
+        self.run_ceph_cmd(f'mgr module enable {self.VOL_MOD_NAME}')
+        # give bit of time for plugin to be functional again
+        sleep(5)
+        json_output = self.get_ceph_cmd_stdout('mgr module ls --format json')
+        json_output = json.loads(json_output)
+        self.assertIn(self.VOL_MOD_NAME, json_output['always_on_modules'])
+        self.assertNotIn(self.VOL_MOD_NAME, json_output['enabled_modules'])
+        self.assertNotIn(self.VOL_MOD_NAME, json_output['disabled_modules'])
+        self.assertNotIn(self.VOL_MOD_NAME, json_output['force_disabled_modules'])
+
+        # plugin is reported properly by "ceph mgr module ls" command, check if
+        # it is also working fine.
+        self.run_ceph_cmd('fs volume ls')

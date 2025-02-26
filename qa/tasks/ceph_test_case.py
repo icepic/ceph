@@ -150,8 +150,6 @@ class CephTestCase(unittest.TestCase, RunCephCmd):
                 ctx=self.ctx, logger=log.getChild('ceph_manager'))
 
     def setUp(self):
-        self._mon_configs_set = set()
-
         self._init_mon_manager()
         self.admin_remote = self.ceph_cluster.admin_remote
 
@@ -166,16 +164,13 @@ class CephTestCase(unittest.TestCase, RunCephCmd):
                 raise self.skipTest("Require `memstore` OSD backend (test " \
                         "would take too long on full sized OSDs")
 
+        self.ceph_cluster.mon_manager.raw_cluster_cmd("config", "dump")
+
     def tearDown(self):
-        self.config_clear()
+        self.ceph_cluster.mon_manager.raw_cluster_cmd("config", "reset", str(self.ctx.conf_epoch))
 
         self.ceph_cluster.mon_manager.raw_cluster_cmd("log",
             "Ended test {0}".format(self.id()))
-
-    def config_clear(self):
-        for section, key in self._mon_configs_set:
-            self.config_rm(section, key)
-        self._mon_configs_set.clear()
 
     def _fix_key(self, key):
         return str(key).replace(' ', '_')
@@ -194,12 +189,9 @@ class CephTestCase(unittest.TestCase, RunCephCmd):
     def config_rm(self, section, key):
        key = self._fix_key(key)
        self.ceph_cluster.mon_manager.raw_cluster_cmd("config", "rm", section, key)
-       # simplification: skip removing from _mon_configs_set;
-       # let tearDown clear everything again
 
     def config_set(self, section, key, value):
        key = self._fix_key(key)
-       self._mon_configs_set.add((section, key))
        self.ceph_cluster.mon_manager.raw_cluster_cmd("config", "set", section, key, str(value))
 
     def cluster_cmd(self, command: str):
@@ -347,5 +339,36 @@ class CephTestCase(unittest.TestCase, RunCephCmd):
                         raise TestTimeoutError("Timed out after {0}s and {1} retries".format(elapsed, retry_count))
                 else:
                     log.debug("wait_until_true: waiting (timeout={0} retry_count={1})...".format(timeout, retry_count))
+                time.sleep(period)
+                elapsed += period
+
+    @classmethod
+    def wait_until_true_and_hold(cls, condition, timeout, success_hold_time, check_fn=None, period=5):
+        """
+        Wait until the condition is met and check if the condition holds for the remaining time.
+        """
+        elapsed = 0
+        retry_count = 0
+        assert success_hold_time < timeout, "success_hold_time should not be greater than timeout"
+        while True:
+            if condition():
+                success_time_elapsed = 0
+                while success_time_elapsed < success_hold_time and condition():
+                    success_time_elapsed += 1
+                    time.sleep(1)
+                    elapsed += 1
+                if success_time_elapsed == success_hold_time:
+                    log.debug("wait_until_true_and_hold: success for {0}s".format(success_hold_time))
+                    return
+            else:
+                if elapsed >= timeout:
+                    if check_fn and check_fn() and retry_count < 5:
+                        elapsed = 0
+                        retry_count += 1
+                        log.debug("wait_until_true_and_hold: making progress, waiting (timeout={0} retry_count={1})...".format(timeout, retry_count))
+                    else:
+                        raise TestTimeoutError("Timed out after {0}s and {1} retries".format(elapsed, retry_count))
+                else:
+                    log.debug("wait_until_true_and_hold waiting (timeout={0} retry_count={1})...".format(timeout, retry_count))
                 time.sleep(period)
                 elapsed += period

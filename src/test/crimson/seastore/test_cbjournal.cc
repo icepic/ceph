@@ -100,12 +100,12 @@ struct entry_validator_t {
       paddr_t paddr = seq.offset.add_offset(offset);
       cursor.seq.offset = paddr;
       auto md = cbj.test_read_validate_record_metadata(
-	cursor, magic).unsafe_get0();
+	cursor, magic).unsafe_get();
       assert(md);
       auto& [header, md_bl] = *md;
       auto dbuf = cbj.read(
 	paddr.add_offset(header.mdlength),
-	header.dlength).unsafe_get0();
+	header.dlength).unsafe_get();
 
       bufferlist bl;
       bl.append(md_bl);
@@ -147,8 +147,12 @@ struct cbjournal_test_t : public seastar_test_suite_t, JournalTrimmer
   /*
    * JournalTrimmer interfaces
    */
-  journal_seq_t get_journal_head() const {
+  journal_seq_t get_journal_head() const final {
     return JOURNAL_SEQ_NULL;
+  }
+
+  segment_seq_t get_journal_head_sequence() const final {
+    return NULL_SEG_SEQ;
   }
 
   journal_seq_t get_dirty_tail() const final {
@@ -160,6 +164,8 @@ struct cbjournal_test_t : public seastar_test_suite_t, JournalTrimmer
   }
 
   void set_journal_head(journal_seq_t head) final {}
+
+  void set_journal_head_sequence(segment_seq_t) final {}
 
   void update_journal_tails(
     journal_seq_t dirty_tail,
@@ -175,15 +181,20 @@ struct cbjournal_test_t : public seastar_test_suite_t, JournalTrimmer
 
   auto submit_record(record_t&& record) {
     entries.push_back(record);
+    entry_validator_t& back = entries.back();
     OrderingHandle handle = get_dummy_ordering_handle();
-    auto [addr, w_result] = cbj->submit_record(
-	  std::move(record),
-	  handle).unsafe_get0();
-    entries.back().seq = w_result.start_seq;
-    entries.back().entries = 1;
-    entries.back().magic = cbj->get_cjs().get_cbj_header().magic;
-    logger().debug("submit entry to addr {}", entries.back().seq);
-    return convert_paddr_to_abs_addr(entries.back().seq.offset);
+    cbj->submit_record(
+      std::move(record),
+      handle,
+      transaction_type_t::MUTATE,
+      [this, &back](auto locator) {
+        back.seq = locator.write_result.start_seq;
+        back.entries = 1;
+        back.magic = cbj->get_cjs().get_cbj_header().magic;
+        logger().debug("submit entry to addr {}", back.seq);
+      }
+    ).unsafe_get();
+    return convert_paddr_to_abs_addr(back.seq.offset);
   }
 
   seastar::future<> tear_down_fut() final {
@@ -308,7 +319,7 @@ struct cbjournal_test_t : public seastar_test_suite_t, JournalTrimmer
     cbj->update_journal_tail(
       seq,
       seq
-    ).get0();
+    ).get();
   }
   void set_written_to(journal_seq_t seq) {
     cbj->set_written_to(seq);
@@ -447,7 +458,7 @@ TEST_F(cbjournal_test_t, boudary_check_verify)
 TEST_F(cbjournal_test_t, update_header)
 {
   run_async([this] {
-    auto [header, _buf] = *(cbj->get_cjs().read_header().unsafe_get0());
+    auto [header, _buf] = *(cbj->get_cjs().read_header().unsafe_get());
     record_t rec {
      { generate_extent(1), generate_extent(2) },
      { generate_delta(20), generate_delta(21) }
@@ -457,10 +468,10 @@ TEST_F(cbjournal_test_t, update_header)
     submit_record(std::move(rec));
 
     update_journal_tail(entries.front().get_abs_addr(), record_total_size);
-    cbj->get_cjs().write_header().unsafe_get0();
-    auto [update_header, update_buf2] = *(cbj->get_cjs().read_header().unsafe_get0());
-    cbj->close().unsafe_get0();
-    replay().unsafe_get0();
+    cbj->get_cjs().write_header().unsafe_get();
+    auto [update_header, update_buf2] = *(cbj->get_cjs().read_header().unsafe_get());
+    cbj->close().unsafe_get();
+    replay().unsafe_get();
 
     ASSERT_EQ(update_header.dirty_tail.offset, update_header.dirty_tail.offset);
   });
@@ -496,8 +507,8 @@ TEST_F(cbjournal_test_t, replay)
        { generate_delta(20), generate_delta(21) }
        });
     ASSERT_TRUE(avail - record_total_size >= get_records_available_size());
-    cbj->close().unsafe_get0();
-    replay().unsafe_get0();
+    cbj->close().unsafe_get();
+    replay().unsafe_get();
   });
 }
 
@@ -525,8 +536,8 @@ TEST_F(cbjournal_test_t, replay_after_reset)
 	convert_abs_addr_to_paddr(
 	  cbj->get_records_start(),
 	  cbj->get_device_id())});
-    cbj->close().unsafe_get0();
-    replay().unsafe_get0();
+    cbj->close().unsafe_get();
+    replay().unsafe_get();
     ASSERT_EQ(old_written_to, get_written_to());
     ASSERT_EQ(old_used_size,
       get_records_used_size());
@@ -568,9 +579,9 @@ TEST_F(cbjournal_test_t, multiple_submit_at_end)
 	    writes++;
 	  }
 	});
-      }).get0();
+      }).get();
     auto old_written_to = get_written_to();
-    cbj->close().unsafe_get0();
+    cbj->close().unsafe_get();
     cbj->replay(
       [](const auto &offsets,
 	     const auto &e,
@@ -579,7 +590,7 @@ TEST_F(cbjournal_test_t, multiple_submit_at_end)
 	     auto last_modified) {
       return Journal::replay_ertr::make_ready_future<
 	std::pair<bool, CachedExtentRef>>(true, nullptr);
-    }).unsafe_get0();
+    }).unsafe_get();
     assert(get_written_to() == old_written_to);
   });
 }

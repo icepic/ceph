@@ -16,12 +16,15 @@
 
 #include "HTMLFormatter.h"
 #include "common/escape.h"
+#include "common/StackStringStream.h"
 #include "include/buffer.h"
 
 #include <fmt/format.h>
 #include <algorithm>
 #include <set>
 #include <limits>
+#include <utility>
+#include <boost/container/small_vector.hpp>
 
 // -----------------------
 namespace ceph {
@@ -29,27 +32,39 @@ namespace ceph {
 std::string
 fixed_u_to_string(uint64_t num, int scale)
 {
-	std::ostringstream t;
+  CachedStackStringStream css;
 
-	t.fill('0');
-	t.width(scale + 1);
-	t << num;
-	int len = t.str().size();
-	return t.str().substr(0,len - scale) + "." + t.str().substr(len - scale);
+  css->fill('0');
+  css->width(scale + 1);
+  *css << num;
+  auto len = css->strv().size();
+
+  CachedStackStringStream css2;
+  *css2 << css->strv().substr(0, len - scale)
+        << "."
+        << css->strv().substr(len - scale);
+  return css2->str();
 }
 
 std::string
 fixed_to_string(int64_t num, int scale)
 {
-	std::ostringstream t;
-	bool neg = num < 0;
-	if (neg) num = -num;
+  CachedStackStringStream css;
 
-	t.fill('0');
-	t.width(scale + 1);
-	t << num;
-	int len = t.str().size();
-	return (neg ? "-" : "") + t.str().substr(0,len - scale) + "." + t.str().substr(len - scale);
+  bool neg = num < 0;
+  if (neg) num = -num;
+
+  css->fill('0');
+  css->width(scale + 1);
+  *css << num;
+  auto len = css->strv().size();
+
+  CachedStackStringStream css2;
+  *css2 << (neg ? "-" : "")
+        << css->strv().substr(0, len - scale)
+        << "."
+        << css->strv().substr(len - scale);
+  return css2->str();
 }
 
 /*
@@ -70,17 +85,13 @@ FormatterAttrs::FormatterAttrs(const char *attr, ...)
     if (!val)
       break;
 
-    attrs.push_back(make_pair(std::string(s), std::string(val)));
+    attrs.emplace_back(s, val);
     s = va_arg(ap, char *);
   } while (s);
   va_end(ap);
 }
 
 void Formatter::write_bin_data(const char*, int){}
-
-Formatter::Formatter() { }
-
-Formatter::~Formatter() { }
 
 Formatter *Formatter::create(std::string_view type,
 			     std::string_view default_type,
@@ -116,9 +127,9 @@ Formatter *Formatter::create(std::string_view type,
 
 void Formatter::flush(bufferlist &bl)
 {
-  std::stringstream os;
-  flush(os);
-  bl.append(os.str());
+  CachedStackStringStream css;
+  flush(*css);
+  bl.append(css->strv());
 }
 
 void Formatter::dump_format(std::string_view name, const char *fmt, ...)
@@ -287,13 +298,24 @@ void JSONFormatter::finish_pending_string()
   }
 }
 
+void JSONFormatter::add_value(std::string_view name, double val) {
+  CachedStackStringStream css;
+  if (!std::isfinite(val) || std::isnan(val)) {
+    *css << "null";
+  } else {
+    css->precision(std::numeric_limits<double>::max_digits10);
+    *css << val;
+  }
+  add_value(name, css->strv(), false);
+}
+
 template <class T>
 void JSONFormatter::add_value(std::string_view name, T val)
 {
-  std::stringstream ss;
-  ss.precision(std::numeric_limits<T>::max_digits10);
-  ss << val;
-  add_value(name, ss.str(), false);
+  CachedStackStringStream css;
+  css->precision(std::numeric_limits<T>::max_digits10);
+  *css << val;
+  add_value(name, css->strv(), false);
 }
 
 void JSONFormatter::add_value(std::string_view name, std::string_view val, bool quoted)
@@ -345,10 +367,21 @@ std::ostream& JSONFormatter::dump_stream(std::string_view name)
 
 void JSONFormatter::dump_format_va(std::string_view name, const char *ns, bool quoted, const char *fmt, va_list ap)
 {
-  char buf[LARGE_SIZE];
-  vsnprintf(buf, LARGE_SIZE, fmt, ap);
+  auto buf = boost::container::small_vector<char, LARGE_SIZE>{
+      LARGE_SIZE, boost::container::default_init};
 
-  add_value(name, buf, quoted);
+  va_list ap_copy;
+  va_copy(ap_copy, ap);
+  int len = vsnprintf(buf.data(), buf.size(), fmt, ap_copy);
+  va_end(ap_copy);
+
+  if (std::cmp_greater_equal(len, buf.size())) {
+    // output was truncated, allocate a buffer large enough
+    buf.resize(len + 1, boost::container::default_init);
+    vsnprintf(buf.data(), buf.size(), fmt, ap);
+  }
+
+  add_value(name, buf.data(), quoted);
 }
 
 int JSONFormatter::get_len() const
@@ -530,15 +563,27 @@ std::ostream& XMLFormatter::dump_stream(std::string_view name)
 
 void XMLFormatter::dump_format_va(std::string_view name, const char *ns, bool quoted, const char *fmt, va_list ap)
 {
-  char buf[LARGE_SIZE];
-  size_t len = vsnprintf(buf, LARGE_SIZE, fmt, ap);
+  auto buf = boost::container::small_vector<char, LARGE_SIZE>{
+      LARGE_SIZE, boost::container::default_init};
+
+  va_list ap_copy;
+  va_copy(ap_copy, ap);
+  int len = vsnprintf(buf.data(), buf.size(), fmt, ap_copy);
+  va_end(ap_copy);
+
+  if (std::cmp_greater_equal(len, buf.size())) {
+    // output was truncated, allocate a buffer large enough
+    buf.resize(len + 1, boost::container::default_init);
+    vsnprintf(buf.data(), buf.size(), fmt, ap);
+  }
+
   auto e = get_xml_name(name);
 
   print_spaces();
   if (ns) {
-    m_ss << "<" << e << " xmlns=\"" << ns << "\">" << xml_stream_escaper(std::string_view(buf, len)) << "</" << e << ">";
+    m_ss << "<" << e << " xmlns=\"" << ns << "\">" << xml_stream_escaper(std::string_view(buf.data(), len)) << "</" << e << ">";
   } else {
-    m_ss << "<" << e << ">" << xml_stream_escaper(std::string_view(buf, len)) << "</" << e << ">";
+    m_ss << "<" << e << ">" << xml_stream_escaper(std::string_view(buf.data(), len)) << "</" << e << ">";
   }
 
   if (m_pretty)
@@ -562,17 +607,15 @@ void XMLFormatter::write_bin_data(const char* buff, int buf_len)
   m_ss.seekg(buf_len);
 }
 
-void XMLFormatter::get_attrs_str(const FormatterAttrs *attrs, std::string& attrs_str)
+void XMLFormatter::get_attrs_str(const FormatterAttrs *attrs, std::string& attrs_str) const
 {
-  std::stringstream attrs_ss;
+  CachedStackStringStream css;
 
-  for (std::list<std::pair<std::string, std::string> >::const_iterator iter = attrs->attrs.begin();
-       iter != attrs->attrs.end(); ++iter) {
-    std::pair<std::string, std::string> p = *iter;
-    attrs_ss << " " << p.first << "=" << "\"" << p.second << "\"";
+  for (const auto &p : attrs->attrs) {
+    *css << " " << p.first << "=" << "\"" << p.second << "\"";
   }
 
-  attrs_str = attrs_ss.str();
+  attrs_str = css->strv();
 }
 
 void XMLFormatter::open_section_in_ns(std::string_view name, const char *ns, const FormatterAttrs *attrs)
@@ -829,9 +872,9 @@ size_t TableFormatter::m_vec_index(std::string_view name)
 std::string TableFormatter::get_section_name(std::string_view name)
 {
   std::string t_name{name};
-  for (size_t i = 0; i < m_section.size(); i++) {
+  for (const auto &i : m_section) {
     t_name.insert(0, ":");
-    t_name.insert(0, m_section[i]);
+    t_name.insert(0, i);
   }
   if (m_section_open) {
     std::stringstream lss;
@@ -907,14 +950,26 @@ void TableFormatter::dump_format_va(std::string_view name,
 				    const char *fmt, va_list ap)
 {
   finish_pending_string();
-  char buf[LARGE_SIZE];
-  vsnprintf(buf, LARGE_SIZE, fmt, ap);
+  auto buf = boost::container::small_vector<char, LARGE_SIZE>{
+      LARGE_SIZE, boost::container::default_init};
+
+  va_list ap_copy;
+  va_copy(ap_copy, ap);
+  int len = vsnprintf(buf.data(), buf.size(), fmt, ap_copy);
+  va_end(ap_copy);
+
+  if (std::cmp_greater_equal(len, buf.size())) {
+    // output was truncated, allocate a buffer large enough
+    buf.resize(len + 1, boost::container::default_init);
+    vsnprintf(buf.data(), buf.size(), fmt, ap); 
+  }
 
   size_t i = m_vec_index(name);
   if (ns) {
-    m_ss << ns << "." << buf;
-  } else
-    m_ss << buf;
+    m_ss << ns << "." << buf.data();
+  } else {
+    m_ss << buf.data();
+  }
 
   m_vec[i].push_back(std::make_pair(get_section_name(name), m_ss.str()));
   m_ss.clear();
@@ -939,17 +994,15 @@ void TableFormatter::write_raw_data(const char *data) {
   // not supported
 }
 
-void TableFormatter::get_attrs_str(const FormatterAttrs *attrs, std::string& attrs_str)
+void TableFormatter::get_attrs_str(const FormatterAttrs *attrs, std::string& attrs_str) const
 {
-  std::stringstream attrs_ss;
+  CachedStackStringStream css;
 
-  for (std::list<std::pair<std::string, std::string> >::const_iterator iter = attrs->attrs.begin();
-       iter != attrs->attrs.end(); ++iter) {
-    std::pair<std::string, std::string> p = *iter;
-    attrs_ss << " " << p.first << "=" << "\"" << p.second << "\"";
+  for (const auto &p : attrs->attrs) {
+    *css << " " << p.first << "=" << "\"" << p.second << "\"";
   }
 
-  attrs_str = attrs_ss.str();
+  attrs_str = css->strv();
 }
 
 void TableFormatter::finish_pending_string()

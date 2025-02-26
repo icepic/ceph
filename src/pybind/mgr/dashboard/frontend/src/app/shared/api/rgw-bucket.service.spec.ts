@@ -62,11 +62,12 @@ describe('RgwBucketService', () => {
         'qwerty1',
         null,
         null,
-        'private'
+        'private',
+        'true'
       )
       .subscribe();
     const req = httpTesting.expectOne(
-      `api/rgw/bucket?bucket=foo&uid=bar&zonegroup=default&lock_enabled=false&lock_mode=COMPLIANCE&lock_retention_period_days=5&encryption_state=true&encryption_type=aws%253Akms&key_id=qwerty1&tags=null&bucket_policy=null&canned_acl=private&${RgwHelper.DAEMON_QUERY_PARAM}`
+      `api/rgw/bucket?bucket=foo&uid=bar&zonegroup=default&lock_enabled=false&lock_mode=COMPLIANCE&lock_retention_period_days=5&encryption_state=true&encryption_type=aws%253Akms&key_id=qwerty1&tags=null&bucket_policy=null&canned_acl=private&replication=true&${RgwHelper.DAEMON_QUERY_PARAM}`
     );
     expect(req.request.method).toBe('POST');
   });
@@ -88,28 +89,20 @@ describe('RgwBucketService', () => {
         '10',
         null,
         null,
-        'private'
+        'private',
+        'true',
+        null
       )
       .subscribe();
     const req = httpTesting.expectOne(
-      `api/rgw/bucket/foo?${RgwHelper.DAEMON_QUERY_PARAM}&bucket_id=bar&uid=baz&versioning_state=Enabled&encryption_state=true&encryption_type=aws%253Akms&key_id=qwerty1&mfa_delete=Enabled&mfa_token_serial=1&mfa_token_pin=223344&lock_mode=GOVERNANCE&lock_retention_period_days=10&tags=null&bucket_policy=null&canned_acl=private`
+      `api/rgw/bucket/foo?${RgwHelper.DAEMON_QUERY_PARAM}&bucket_id=bar&uid=baz&versioning_state=Enabled&encryption_state=true&encryption_type=aws%253Akms&key_id=qwerty1&mfa_delete=Enabled&mfa_token_serial=1&mfa_token_pin=223344&lock_mode=GOVERNANCE&lock_retention_period_days=10&tags=null&bucket_policy=null&canned_acl=private&replication=true&lifecycle=null`
     );
     expect(req.request.method).toBe('PUT');
   });
 
-  it('should call delete, with purgeObjects = true', () => {
+  it('should call delete', () => {
     service.delete('foo').subscribe();
-    const req = httpTesting.expectOne(
-      `api/rgw/bucket/foo?${RgwHelper.DAEMON_QUERY_PARAM}&purge_objects=true`
-    );
-    expect(req.request.method).toBe('DELETE');
-  });
-
-  it('should call delete, with purgeObjects = false', () => {
-    service.delete('foo', false).subscribe();
-    const req = httpTesting.expectOne(
-      `api/rgw/bucket/foo?${RgwHelper.DAEMON_QUERY_PARAM}&purge_objects=false`
-    );
+    const req = httpTesting.expectOne(`api/rgw/bucket/foo?${RgwHelper.DAEMON_QUERY_PARAM}`);
     expect(req.request.method).toBe('DELETE');
   });
 

@@ -23,12 +23,13 @@
 #include <string_view>
 #include <tuple>
 #include <optional>
+#include <unordered_map>
+#include <unordered_set>
+
 #include <boost/container/small_vector.hpp>
 #include <boost/optional/optional_io.hpp>
 #include <boost/tuple/tuple.hpp>
 
-#include "include/unordered_map.h"
-#include "include/unordered_set.h"
 #include "common/ceph_time.h"
 
 #include "include/int_types.h"
@@ -586,16 +587,16 @@ inline void encode(const std::multimap<T,U,Comp,Alloc>& m, bufferlist& bl);
 template<class T, class U, class Comp, class Alloc>
 inline void decode(std::multimap<T,U,Comp,Alloc>& m, bufferlist::const_iterator& p);
 template<class T, class U, class Hash, class Pred, class Alloc>
-inline void encode(const unordered_map<T,U,Hash,Pred,Alloc>& m, bufferlist& bl,
+inline void encode(const std::unordered_map<T,U,Hash,Pred,Alloc>& m, bufferlist& bl,
 		   uint64_t features);
 template<class T, class U, class Hash, class Pred, class Alloc>
-inline void encode(const unordered_map<T,U,Hash,Pred,Alloc>& m, bufferlist& bl);
+inline void encode(const std::unordered_map<T,U,Hash,Pred,Alloc>& m, bufferlist& bl);
 template<class T, class U, class Hash, class Pred, class Alloc>
-inline void decode(unordered_map<T,U,Hash,Pred,Alloc>& m, bufferlist::const_iterator& p);
+inline void decode(std::unordered_map<T,U,Hash,Pred,Alloc>& m, bufferlist::const_iterator& p);
 template<class T, class Hash, class Pred, class Alloc>
-inline void encode(const ceph::unordered_set<T,Hash,Pred,Alloc>& m, bufferlist& bl);
+inline void encode(const std::unordered_set<T,Hash,Pred,Alloc>& m, bufferlist& bl);
 template<class T, class Hash, class Pred, class Alloc>
-inline void decode(ceph::unordered_set<T,Hash,Pred,Alloc>& m, bufferlist::const_iterator& p);
+inline void decode(std::unordered_set<T,Hash,Pred,Alloc>& m, bufferlist::const_iterator& p);
 template<class T, class Alloc>
 inline void encode(const std::deque<T,Alloc>& ls, bufferlist& bl, uint64_t features);
 template<class T, class Alloc>
@@ -1299,9 +1300,9 @@ inline void decode(std::multimap<T,U,Comp,Alloc>& m, bufferlist::const_iterator&
   }
 }
 
-// ceph::unordered_map
+// std::unordered_map
 template<class T, class U, class Hash, class Pred, class Alloc>
-inline void encode(const unordered_map<T,U,Hash,Pred,Alloc>& m, bufferlist& bl,
+inline void encode(const std::unordered_map<T,U,Hash,Pred,Alloc>& m, bufferlist& bl,
 		   uint64_t features)
 {
   __u32 n = (__u32)(m.size());
@@ -1312,7 +1313,7 @@ inline void encode(const unordered_map<T,U,Hash,Pred,Alloc>& m, bufferlist& bl,
   }
 }
 template<class T, class U, class Hash, class Pred, class Alloc>
-inline void encode(const unordered_map<T,U,Hash,Pred,Alloc>& m, bufferlist& bl)
+inline void encode(const std::unordered_map<T,U,Hash,Pred,Alloc>& m, bufferlist& bl)
 {
   __u32 n = (__u32)(m.size());
   encode(n, bl);
@@ -1322,7 +1323,7 @@ inline void encode(const unordered_map<T,U,Hash,Pred,Alloc>& m, bufferlist& bl)
   }
 }
 template<class T, class U, class Hash, class Pred, class Alloc>
-inline void decode(unordered_map<T,U,Hash,Pred,Alloc>& m, bufferlist::const_iterator& p)
+inline void decode(std::unordered_map<T,U,Hash,Pred,Alloc>& m, bufferlist::const_iterator& p)
 {
   __u32 n;
   decode(n, p);
@@ -1335,7 +1336,7 @@ inline void decode(unordered_map<T,U,Hash,Pred,Alloc>& m, bufferlist::const_iter
 }
 
 template <std::move_constructible T, std::move_constructible U, class Hash, class Pred, class Alloc>
-inline void decode(unordered_map<T, U, Hash, Pred, Alloc>& m, bufferlist::const_iterator& p)
+inline void decode(std::unordered_map<T, U, Hash, Pred, Alloc>& m, bufferlist::const_iterator& p)
 {
   __u32 n;
   decode(n, p);
@@ -1349,9 +1350,9 @@ inline void decode(unordered_map<T, U, Hash, Pred, Alloc>& m, bufferlist::const_
   }
 }
 
-// ceph::unordered_set
+// std::unordered_set
 template<class T, class Hash, class Pred, class Alloc>
-inline void encode(const ceph::unordered_set<T,Hash,Pred,Alloc>& m, bufferlist& bl)
+inline void encode(const std::unordered_set<T,Hash,Pred,Alloc>& m, bufferlist& bl)
 {
   __u32 n = (__u32)(m.size());
   encode(n, bl);
@@ -1359,7 +1360,7 @@ inline void encode(const ceph::unordered_set<T,Hash,Pred,Alloc>& m, bufferlist& 
     encode(*p, bl);
 }
 template<class T, class Hash, class Pred, class Alloc>
-inline void decode(ceph::unordered_set<T,Hash,Pred,Alloc>& m, bufferlist::const_iterator& p)
+inline void decode(std::unordered_set<T,Hash,Pred,Alloc>& m, bufferlist::const_iterator& p)
 {
   __u32 n;
   decode(n, p);
@@ -1466,7 +1467,11 @@ decode(std::array<T, N>& v, bufferlist::const_iterator& p)
 #define ENCODE_FINISH(bl) ENCODE_FINISH_NEW_COMPAT(bl, 0)
 
 #define DECODE_ERR_OLDVERSION(func, v, compatv)					\
-  (std::string(func) + " no longer understand old encoding version " #v " < " + std::to_string(compatv))
+  (std::string(func) + " no longer understands old encoding version " #v " < " + std::to_string(compatv))
+
+#define DECODE_ERR_NO_COMPAT(func, code_v, v, compatv)					\
+  ("Decoder at '" + std::string(func) + "' v=" + std::to_string(code_v) +		\
+  " cannot decode v=" + std::to_string(v) + " minimal_decoder=" + std::to_string(compatv))
 
 #define DECODE_ERR_PAST(func) \
   (std::string(func) + " decode past end of struct encoding")
@@ -1494,7 +1499,7 @@ decode(std::array<T, N>& v, bufferlist::const_iterator& p)
   decode(struct_v, bl);						\
   decode(struct_compat, bl);						\
   if (v < struct_compat)						\
-    throw ::ceph::buffer::malformed_input(DECODE_ERR_OLDVERSION(__PRETTY_FUNCTION__, v, struct_compat)); \
+    throw ::ceph::buffer::malformed_input(DECODE_ERR_NO_COMPAT(__PRETTY_FUNCTION__, v, struct_v, struct_compat)); \
   __u32 struct_len;							\
   decode(struct_len, bl);						\
   if (struct_len > bl.get_remaining())					\
@@ -1512,7 +1517,7 @@ decode(std::array<T, N>& v, bufferlist::const_iterator& p)
     __u8 struct_compat;							\
     decode(struct_compat, bl);					\
     if (v < struct_compat)						\
-      throw ::ceph::buffer::malformed_input(DECODE_ERR_OLDVERSION(__PRETTY_FUNCTION__, v, struct_compat)); \
+      throw ::ceph::buffer::malformed_input(DECODE_ERR_NO_COMPAT(__PRETTY_FUNCTION__, v, struct_v, struct_compat)); \
   } else if (skip_v) {							\
     if (bl.get_remaining() < skip_v)					\
       throw ::ceph::buffer::malformed_input(DECODE_ERR_PAST(__PRETTY_FUNCTION__)); \
@@ -1554,8 +1559,8 @@ decode(std::array<T, N>& v, bufferlist::const_iterator& p)
     __u8 struct_compat;							\
     decode(struct_compat, bl);						\
     if (v < struct_compat)						\
-      throw ::ceph::buffer::malformed_input(DECODE_ERR_OLDVERSION(	\
-	__PRETTY_FUNCTION__, v, struct_compat));			\
+      throw ::ceph::buffer::malformed_input(DECODE_ERR_NO_COMPAT(	\
+	__PRETTY_FUNCTION__, v, struct_v, struct_compat));		\
   }									\
   unsigned struct_end = 0;						\
   if (struct_v >= lenv) {						\

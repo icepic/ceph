@@ -19,6 +19,7 @@
 
 #include "msg/Dispatcher.h"
 
+#include "common/admin_finisher.h"
 #include "common/async/context_pool.h"
 #include "common/Timer.h"
 #include "common/WorkQueue.h"
@@ -44,9 +45,9 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
 
-#include "include/unordered_map.h"
-
+#include "common/intrusive_timer.h"
 #include "common/shared_cache.hpp"
 #include "common/simple_cache.hpp"
 #include "messages/MOSDOp.h"
@@ -118,6 +119,8 @@ public:
 
   void enqueue_back(OpSchedulerItem&& qi);
   void enqueue_front(OpSchedulerItem&& qi);
+  /// scheduler cost per io, only valid for mclock, asserts for wpq
+  double get_cost_per_io() const;
 
   void maybe_inject_dispatch_delay() {
     if (g_conf()->osd_debug_inject_dispatch_delay_probability > 0) {
@@ -511,8 +514,6 @@ public:
   void queue_for_snap_trim(PG *pg, uint64_t cost);
   void queue_for_scrub(PG* pg, Scrub::scrub_prio_t with_priority);
 
-  void queue_scrub_after_repair(PG* pg, Scrub::scrub_prio_t with_priority);
-
   /// Signals either (a) the end of a sleep period, or (b) a recheck of the availability
   /// of the primary map being created by the backend.
   void queue_for_scrub_resched(PG* pg, Scrub::scrub_prio_t with_priority);
@@ -524,7 +525,7 @@ public:
   void queue_scrub_applied_update(PG* pg, Scrub::scrub_prio_t with_priority);
 
   /// Signals that the selected chunk (objects range) is available for scrubbing
-  void queue_scrub_chunk_free(PG* pg, Scrub::scrub_prio_t with_priority);
+  void queue_scrub_chunk_free(PG* pg, Scrub::scrub_prio_t with_priority, uint64_t cost);
 
   /// The chunk selected is blocked by user operations, and cannot be scrubbed now
   void queue_scrub_chunk_busy(PG* pg, Scrub::scrub_prio_t with_priority);
@@ -550,7 +551,8 @@ public:
   void queue_for_rep_scrub(PG* pg,
 			   Scrub::scrub_prio_t with_high_priority,
 			   unsigned int qu_priority,
-			   Scrub::act_token_t act_token);
+			   Scrub::act_token_t act_token,
+			   uint64_t cost);
 
   /// Signals a change in the number of in-flight recovery writes
   void queue_scrub_replica_pushes(PG *pg, Scrub::scrub_prio_t with_priority);
@@ -583,14 +585,20 @@ private:
   void queue_scrub_event_msg(PG* pg,
 			     Scrub::scrub_prio_t with_priority,
 			     unsigned int qu_priority,
-			     Scrub::act_token_t act_token);
+			     Scrub::act_token_t act_token,
+			     uint64_t cost);
 
   /// An alternative version of queue_scrub_event_msg(), in which the queuing priority is
   /// provided by the executing scrub (i.e. taken from PgScrubber::m_flags)
   template <class MSG_TYPE>
-  void queue_scrub_event_msg(PG* pg, Scrub::scrub_prio_t with_priority);
-  int64_t get_scrub_cost();
-
+  void queue_scrub_event_msg(PG* pg, Scrub::scrub_prio_t with_priority, uint64_t cost);
+  template <class MSG_TYPE>
+  void queue_scrub_event_msg_default_cost(PG* pg, Scrub::scrub_prio_t with_priority);
+  template <class MSG_TYPE>
+  void queue_scrub_event_msg_default_cost(PG* pg,
+		                          Scrub::scrub_prio_t with_priority,
+					  unsigned int qu_priority,
+					  Scrub::act_token_t act_token);
   utime_t defer_recovery_until;
   uint64_t recovery_ops_active;
   uint64_t recovery_ops_reserved;
@@ -723,6 +731,7 @@ public:
     osd_alert_list_t& alerts);
   osd_stat_t set_osd_stat(std::vector<int>& hb_peers, int num_pgs);
   void inc_osd_stat_repaired(void);
+  void set_osd_stat_repaired(int64_t count);
   float compute_adjusted_ratio(osd_stat_t new_stat, float *pratio, uint64_t adjust_used = 0);
   osd_stat_t get_osd_stat() {
     std::lock_guard l(stat_lock);
@@ -869,6 +878,8 @@ public:
   bool prepare_to_stop();
   void got_stop_ack();
 
+  // -- PG timer --
+  common::intrusive_timer pg_timer;
 
 #ifdef PG_DEBUG_REFS
   ceph::mutex pgid_lock = ceph::make_mutex("OSDService::pgid_lock");
@@ -1065,7 +1076,7 @@ class OSD : public Dispatcher,
 
 public:
   // config observer bits
-  const char** get_tracked_conf_keys() const override;
+  std::vector<std::string> get_tracked_keys() const noexcept override;
   void handle_conf_change(const ConfigProxy& conf,
                           const std::set <std::string> &changed) override;
   void update_log_config();
@@ -1124,13 +1135,13 @@ protected:
     std::stringstream& ss,
     const bufferlist& inbl,
     bufferlist& outbl,
-    std::function<void(int, const std::string&, bufferlist&)> on_finish);
+    asok_finisher on_finish);
   void asok_command(
     std::string_view prefix,
     const cmdmap_t& cmdmap,
     ceph::Formatter *f,
     const ceph::buffer::list& inbl,
-    std::function<void(int,const std::string&,ceph::buffer::list&)> on_finish);
+    asok_finisher on_finish);
 
 public:
   int get_nodeid() { return whoami; }
@@ -1497,7 +1508,7 @@ public:
     bool ms_handle_refused(Connection *con) override {
       return osd->ms_handle_refused(con);
     }
-    int ms_handle_fast_authentication(Connection *con) override {
+    bool ms_handle_fast_authentication(Connection *con) override {
       return true;
     }
   } heartbeat_dispatcher;
@@ -1621,6 +1632,11 @@ protected:
 	p->complete(0);
       }
     }
+
+    double get_cost_per_io() const {
+      auto &sdata = osd->shards[0];
+      return sdata->scheduler->get_cost_per_io();
+    }
   } op_shardedwq;
 
 
@@ -1667,6 +1683,12 @@ protected:
     return osdmap ? osdmap->get_epoch() : 0;
   }
 
+  /* When handling OSDMaps pg_num_history is used to
+   * track any changes to number of PGs of each pool
+   * to be used later in order to identify PG splits and merges.
+   * See: OSD::track_pools_and_pg_num_changes
+   *      and OSDService::identify_splits_and_merges.
+   */
   pool_pg_num_history_t pg_num_history;
 
   ceph::shared_mutex map_lock = ceph::make_shared_mutex("OSD::map_lock");
@@ -1675,6 +1697,12 @@ protected:
   friend struct send_map_on_destruct;
 
   void handle_osd_map(class MOSDMap *m);
+  void track_pools_and_pg_num_changes(const std::map<epoch_t,OSDMapRef>& added_maps,
+                                      ObjectStore::Transaction& t);
+  void _track_pools_and_pg_num_changes(ObjectStore::Transaction& t,
+                                       const OSDMapRef& lastmap,
+                                       const OSDMapRef& current_added_map,
+                                       epoch_t current_added_map_epoch);
   void _committed_osd_maps(epoch_t first, epoch_t last, class MOSDMap *m);
   void trim_maps(epoch_t oldest);
   void note_down_osd(int osd);
@@ -1916,6 +1944,7 @@ private:
     case MSG_OSD_REP_SCRUBMAP:
     case MSG_OSD_PG_UPDATE_LOG_MISSING:
     case MSG_OSD_PG_UPDATE_LOG_MISSING_REPLY:
+    case MSG_OSD_PG_PCT:
     case MSG_OSD_PG_RECOVERY_DELETE:
     case MSG_OSD_PG_RECOVERY_DELETE_REPLY:
     case MSG_OSD_PG_LEASE:
@@ -1930,7 +1959,7 @@ private:
   void ms_handle_connect(Connection *con) override;
   void ms_handle_fast_connect(Connection *con) override;
   void ms_handle_fast_accept(Connection *con) override;
-  int ms_handle_fast_authentication(Connection *con) override;
+  bool ms_handle_fast_authentication(Connection *con) override;
   bool ms_handle_reset(Connection *con) override;
   void ms_handle_remote_reset(Connection *con) override {}
   bool ms_handle_refused(Connection *con) override;

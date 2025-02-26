@@ -20,9 +20,6 @@
 //#define MDS_AUTHPIN_SET  // define me for debugging auth pin leaks
 //#define MDS_VERIFY_FRAGSTAT    // do (slow) sanity checking on frags
 
-/*
- * for metadata leases to clients
- */
 class MLock;
 class SimpleLock;
 class MDSCacheObject;
@@ -31,22 +28,6 @@ class MDSContext;
 namespace ceph {
 class Formatter;
 }
-
-struct ClientLease {
-  ClientLease(client_t c, MDSCacheObject *p) :
-    client(c), parent(p),
-    item_session_lease(this),
-    item_lease(this) { }
-  ClientLease() = delete;
-
-  client_t client;
-  MDSCacheObject *parent;
-
-  ceph_seq_t seq = 0;
-  utime_t ttl;
-  xlist<ClientLease*>::item item_session_lease; // per-session list
-  xlist<ClientLease*>::item item_lease;         // global list
-};
 
 // print hack
 struct mdsco_db_line_prefix {
@@ -278,6 +259,8 @@ class MDSCacheObject {
     return is_waiter_for(waitmask_t(mask));
   }
   bool is_waiter_for(waitmask_t mask);
+
+  inline size_t count_waiters(uint64_t mask) const { return waiting.count(mask); }
 
   virtual void add_waiter(uint64_t mask, MDSContext *c) {
     add_waiter(waitmask_t(mask), c);

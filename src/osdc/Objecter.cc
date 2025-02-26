@@ -12,10 +12,12 @@
  *
  */
 
-#include <algorithm>
-#include <cerrno>
-
 #include "Objecter.h"
+#include "Striper.h"
+
+#include <algorithm>
+#include <sstream>
+
 #include "osd/OSDMap.h"
 #include "osd/error_code.h"
 #include "Filer.h"
@@ -90,6 +92,7 @@ using ceph::timespan;
 using ceph::shunique_lock;
 using ceph::acquire_shared;
 using ceph::acquire_unique;
+using namespace std::literals;
 
 namespace bc = boost::container;
 namespace bs = boost::system;
@@ -180,6 +183,10 @@ enum {
   l_osdc_osdop_omap_rd,
   l_osdc_osdop_omap_del,
 
+  l_osdc_replica_read_sent,
+  l_osdc_replica_read_bounced,
+  l_osdc_replica_read_completed,
+
   l_osdc_last,
 };
 
@@ -214,15 +221,13 @@ std::unique_lock<std::mutex> Objecter::OSDSession::get_lock(object_t& oid)
   return {completion_locks[h % num_locks], std::defer_lock};
 }
 
-const char** Objecter::get_tracked_conf_keys() const
+std::vector<std::string> Objecter::get_tracked_keys() const noexcept
 {
-  static const char *config_keys[] = {
-    "crush_location",
-    "rados_mon_op_timeout",
-    "rados_osd_op_timeout",
-    NULL
+  return {
+    "crush_location"s,
+    "rados_mon_op_timeout"s,
+    "rados_osd_op_timeout"s
   };
-  return config_keys;
 }
 
 
@@ -237,6 +242,13 @@ void Objecter::handle_conf_change(const ConfigProxy& conf,
   }
   if (changed.count("rados_osd_op_timeout")) {
     osd_timeout = conf.get_val<std::chrono::seconds>("rados_osd_op_timeout");
+  }
+
+  auto read_policy = conf.get_val<std::string>("rados_replica_read_policy");
+  if (read_policy == "localize") {
+    extra_read_flags = CEPH_OSD_FLAG_LOCALIZE_READS;
+  } else if (read_policy == "balance") {
+    extra_read_flags = CEPH_OSD_FLAG_BALANCE_READS;
   }
 }
 
@@ -377,6 +389,13 @@ void Objecter::init()
 			"OSD OMAP read operations");
     pcb.add_u64_counter(l_osdc_osdop_omap_del, "omap_del",
 			"OSD OMAP delete operations");
+
+    pcb.add_u64_counter(l_osdc_replica_read_sent, "replica_read_sent",
+			"Operations sent to replica");
+    pcb.add_u64_counter(l_osdc_replica_read_bounced, "replica_read_bounced",
+			"Operations bounced by replica to be resent to primary");
+    pcb.add_u64_counter(l_osdc_replica_read_completed, "replica_read_completed",
+			"Operations completed by replica");
 
     logger = pcb.create_perf_counters();
     cct->get_perfcounters_collection()->add(logger);
@@ -1382,7 +1401,7 @@ void Objecter::handle_osd_map(MOSDMap *m)
     for (auto& [c, ec] : p->second) {
       asio::post(service.get_executor(), asio::append(std::move(c), ec));
     }
-    waiting_for_map.erase(p++);
+    p = waiting_for_map.erase(p);
   }
 
   monc->sub_got("osdmap", osdmap->get_epoch());
@@ -2326,6 +2345,10 @@ void Objecter::_send_op_account(Op *op)
     num_in_flight++;
   } else {
     ldout(cct, 20) << " note: not requesting reply" << dendl;
+  }
+
+  if (op->target.used_replica) {
+    logger->inc(l_osdc_replica_read_sent);
   }
 
   logger->inc(l_osdc_op_active);
@@ -3475,6 +3498,15 @@ void Objecter::handle_osd_op_reply(MOSDOpReply *m)
     _op_submit(op, sul, NULL);
     m->put();
     return;
+  }
+
+  if (op->target.flags & (CEPH_OSD_FLAG_BALANCE_READS |
+			  CEPH_OSD_FLAG_LOCALIZE_READS)) {
+    if (rc == -EAGAIN) {
+      logger->inc(l_osdc_replica_read_bounced);
+    } else {
+      logger->inc(l_osdc_replica_read_completed);
+    }
   }
 
   if (rc == -EAGAIN) {
@@ -5087,6 +5119,15 @@ Objecter::Objecter(CephContext *cct,
 {
   mon_timeout = cct->_conf.get_val<std::chrono::seconds>("rados_mon_op_timeout");
   osd_timeout = cct->_conf.get_val<std::chrono::seconds>("rados_osd_op_timeout");
+
+  auto read_policy = cct->_conf.get_val<std::string>("rados_replica_read_policy");
+  if (read_policy == "localize") {
+    ldout(cct, 20) << __func__ << ": read policy: localize" << dendl;
+    extra_read_flags = CEPH_OSD_FLAG_LOCALIZE_READS;
+  } else if (read_policy == "balance") {
+    ldout(cct, 20) << __func__ << ": read policy: balance" << dendl;
+    extra_read_flags = CEPH_OSD_FLAG_BALANCE_READS;
+  }
 }
 
 Objecter::~Objecter()

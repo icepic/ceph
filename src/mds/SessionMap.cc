@@ -81,9 +81,7 @@ void SessionMap::register_perfcounters()
 void SessionMap::dump()
 {
   dout(10) << "dump" << dendl;
-  for (ceph::unordered_map<entity_name_t,Session*>::iterator p = session_map.begin();
-       p != session_map.end();
-       ++p) 
+  for (auto p = session_map.begin(); p != session_map.end(); ++p) 
     dout(10) << p->first << " " << p->second
 	     << " state " << p->second->get_state_name()
 	     << " completed " << p->second->info.completed_requests
@@ -256,8 +254,7 @@ void SessionMap::_load_finish(
   } else {
     // I/O is complete.  Update `by_state`
     dout(10) << __func__ << ": omap load complete" << dendl;
-    for (ceph::unordered_map<entity_name_t, Session*>::iterator i = session_map.begin();
-         i != session_map.end(); ++i) {
+    for (auto i = session_map.begin(); i != session_map.end(); ++i) {
       Session *s = i->second;
       auto by_state_entry = by_state.find(s->get_state());
       if (by_state_entry == by_state.end())
@@ -349,8 +346,7 @@ void SessionMap::_load_legacy_finish(int r, bufferlist &bl)
 
   // Mark all sessions dirty, so that on next save() we will write
   // a complete OMAP version of the data loaded from the legacy format
-  for (ceph::unordered_map<entity_name_t, Session*>::iterator i = session_map.begin();
-       i != session_map.end(); ++i) {
+  for (auto i = session_map.begin(); i != session_map.end(); ++i) {
     // Don't use mark_dirty because on this occasion we want to ignore the
     // keys_per_op limit and do one big write (upgrade must be atomic)
     dirty_sessions.insert(i->first);
@@ -503,8 +499,7 @@ void SessionMap::decode_legacy(bufferlist::const_iterator &p)
   SessionMapStore::decode_legacy(p);
 
   // Update `by_state`
-  for (ceph::unordered_map<entity_name_t, Session*>::iterator i = session_map.begin();
-       i != session_map.end(); ++i) {
+  for (auto i = session_map.begin(); i != session_map.end(); ++i) {
     Session *s = i->second;
     auto by_state_entry = by_state.find(s->get_state());
     if (by_state_entry == by_state.end())
@@ -615,6 +610,7 @@ void Session::dump(Formatter *f, bool cap_dump) const
   f->dump_unsigned("num_completed_requests", get_num_completed_requests());
   f->dump_unsigned("num_completed_flushes", get_num_completed_flushes());
   f->dump_bool("reconnecting", reconnecting);
+  f->dump_int("importing_count", importing_count);
   f->dump_object("recall_caps", recall_caps);
   f->dump_object("release_caps", release_caps);
   f->dump_object("recall_caps_throttle", recall_caps_throttle);
@@ -668,9 +664,7 @@ void SessionMap::wipe()
 
 void SessionMap::wipe_ino_prealloc()
 {
-  for (ceph::unordered_map<entity_name_t,Session*>::iterator p = session_map.begin(); 
-       p != session_map.end(); 
-       ++p) {
+  for (auto p = session_map.begin();  p != session_map.end();  ++p) {
     p->second->pending_prealloc_inos.clear();
     p->second->free_prealloc_inos.clear();
     p->second->delegated_inos.clear();
@@ -1040,12 +1034,35 @@ int Session::check_access(CInode *in, unsigned mask,
 			  const vector<uint64_t> *caller_gid_list,
 			  int new_uid, int new_gid)
 {
+  dout(20) << __func__ << ": " << *in
+           << " caller_uid=" << caller_uid
+           << " caller_gid=" << caller_gid
+           << " caller_gid_list=" << *caller_gid_list
+           << dendl;
+
   string path;
-  CInode *diri = NULL;
-  if (!in->is_base())
-    diri = in->get_projected_parent_dn()->get_dir()->get_inode();
-  if (diri && diri->is_stray()){
-    path = in->get_projected_inode()->stray_prior_path;
+  if (!in->is_base()) {
+    auto* dn = in->get_projected_parent_dn();
+    auto* pdiri = dn->get_dir()->get_inode();
+    if (pdiri) {
+      if (pdiri->is_stray()) {
+        path = in->get_projected_inode()->stray_prior_path;
+      } else if (!pdiri->is_base()) {
+        /* is the pdiri in the stray (is this inode in a snapshotted deleted directory?) */
+        auto* gpdiri = pdiri->get_projected_parent_dn()->get_dir()->get_inode();
+        /* stray_prior_path will not necessarily be part of the inode because
+         * it's set on unlink but that happens after the snapshot, naturally.
+         * We need to construct it manually.
+         */
+        if (gpdiri->is_stray()) {
+          /* just check access on the parent dir */
+          path = pdiri->get_projected_inode()->stray_prior_path;
+        }
+      }
+    }
+  }
+
+  if (!path.empty()) {
     dout(20) << __func__ << " stray_prior_path " << path << dendl;
   } else {
     in->make_path_string(path, true);
@@ -1060,14 +1077,14 @@ int Session::check_access(CInode *in, unsigned mask,
       inode->layout.pool_ns.length() &&
       !connection->has_feature(CEPH_FEATURE_FS_FILE_LAYOUT_V2)) {
     dout(10) << __func__ << " client doesn't support FS_FILE_LAYOUT_V2" << dendl;
-    return -CEPHFS_EIO;
+    return -EIO;
   }
 
   if (!auth_caps.is_capable(path, inode->uid, inode->gid, inode->mode,
 			    caller_uid, caller_gid, caller_gid_list, mask,
 			    new_uid, new_gid,
 			    info.inst.addr)) {
-    return -CEPHFS_EACCES;
+    return -EACCES;
   }
   return 0;
 }
@@ -1190,7 +1207,7 @@ int SessionFilter::parse(
       id = strict_strtoll(s.c_str(), 10, &err);
       if (!err.empty()) {
 	*ss << "Invalid filter '" << s << "'";
-	return -CEPHFS_EINVAL;
+	return -EINVAL;
       }
       return 0;
     }
@@ -1217,16 +1234,23 @@ int SessionFilter::parse(
       state = v;
     } else if (k == "id") {
       std::string err;
+      if (v == "*") {
+        // evict all clients , by default id set to 0
+        return 0;
+      } else if (v == "0") {
+        *ss << "Invalid value";
+        return -EINVAL;
+      }
       id = strict_strtoll(v.c_str(), 10, &err);
       if (!err.empty()) {
         *ss << err;
-        return -CEPHFS_EINVAL;
+        return -EINVAL;
       }
     } else if (k == "reconnecting") {
 
       /**
        * Strict boolean parser.  Allow true/false/0/1.
-       * Anything else is -CEPHFS_EINVAL.
+       * Anything else is -EINVAL.
        */
       auto is_true = [](std::string_view bstr, bool *out) -> bool
       {
@@ -1239,7 +1263,7 @@ int SessionFilter::parse(
           *out = false;
           return 0;
         } else {
-          return -CEPHFS_EINVAL;
+          return -EINVAL;
         }
       };
 
@@ -1249,11 +1273,11 @@ int SessionFilter::parse(
         set_reconnecting(bval);
       } else {
         *ss << "Invalid boolean value '" << v << "'";
-        return -CEPHFS_EINVAL;
+        return -EINVAL;
       }
     } else {
       *ss << "Invalid filter key '" << k << "'";
-      return -CEPHFS_EINVAL;
+      return -EINVAL;
     }
   }
 

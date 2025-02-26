@@ -1,5 +1,6 @@
 import { PageHelper } from '../page-helper.po';
 
+const WAIT_TIMER = 500;
 const pages = {
   index: { url: '#/rgw/bucket', id: 'cd-rgw-bucket-list' },
   create: { url: '#/rgw/bucket/create', id: 'cd-rgw-bucket-form' }
@@ -44,22 +45,14 @@ export class BucketsPageHelper extends PageHelper {
     }
 
     // Click the create button and wait for bucket to be made
-    cy.contains('button', 'Create Bucket').click();
+    cy.contains('button', 'Create Bucket').wait(WAIT_TIMER).click();
 
     this.getFirstTableCell(name).should('exist');
   }
 
-  @PageHelper.restrictTo(pages.create.url)
-  checkForDefaultEncryption() {
-    cy.get("a[aria-label='click here']").click();
-    cy.get('cd-modal').within(() => {
-      cy.get('input[id=s3Enabled]').should('be.checked');
-    });
-  }
-
   @PageHelper.restrictTo(pages.index.url)
   edit(name: string, new_owner: string, isLocking = false) {
-    this.navigateEdit(name);
+    this.navigateEdit(name, false, false, null, true);
 
     // Placement target is not allowed to be edited and should be hidden
     cy.get('input[name=placement-target]').should('not.exist');
@@ -73,7 +66,7 @@ export class BucketsPageHelper extends PageHelper {
 
       this.getTableCell(this.columnIndex.name, name)
         .parent()
-        .find(`datatable-body-cell:nth-child(${this.columnIndex.owner})`)
+        .find(`[cdstabledata]:nth-child(${this.columnIndex.owner})`)
         .should(($elements) => {
           const bucketName = $elements.text();
           expect(bucketName).to.eq(new_owner);
@@ -83,7 +76,7 @@ export class BucketsPageHelper extends PageHelper {
       this.getExpandCollapseElement(name).click();
 
       // check its details table for edited owner field
-      cy.get('.table.table-striped.table-bordered').first().as('bucketDataTable');
+      cy.get('[data-testid="rgw-bucket-details"]').first().as('bucketDataTable');
 
       // Check versioning enabled:
       cy.get('@bucketDataTable').find('tr').its(0).find('td').last().as('versioningValueCell');
@@ -99,7 +92,7 @@ export class BucketsPageHelper extends PageHelper {
     // Check if the owner is updated
     this.getTableCell(this.columnIndex.name, name)
       .parent()
-      .find(`datatable-body-cell:nth-child(${this.columnIndex.owner})`)
+      .find(`[cdstabledata]:nth-child(${this.columnIndex.owner})`)
       .should(($elements) => {
         const bucketName = $elements.text();
         expect(bucketName).to.eq(new_owner);
@@ -109,17 +102,17 @@ export class BucketsPageHelper extends PageHelper {
     this.getExpandCollapseElement(name).click();
 
     // Check versioning enabled:
-    cy.get('.table.table-striped.table-bordered').first().as('bucketDataTable');
+    cy.get('[data-testid="rgw-bucket-details"]').first().as('bucketDataTable');
     cy.get('@bucketDataTable').find('tr').its(0).find('td').last().as('versioningValueCell');
 
     cy.get('@versioningValueCell').should('have.text', this.versioningStateEnabled);
 
     // Disable versioning:
-    this.navigateEdit(name);
+    this.navigateEdit(name, false, true, null, true);
 
     cy.get('label[for=versioning]').click();
     cy.get('input[id=versioning]').should('not.be.checked');
-    cy.contains('button', 'Edit Bucket').click();
+    cy.contains('button', 'Edit Bucket').wait(WAIT_TIMER).click();
 
     // Check versioning suspended:
     this.getExpandCollapseElement(name).click();
@@ -134,7 +127,7 @@ export class BucketsPageHelper extends PageHelper {
     // Gives an invalid name (too short), then waits for dashboard to determine validity
     cy.get('@nameInputField').type('rq');
 
-    cy.contains('button', 'Create Bucket').click(); // To trigger a validation
+    cy.contains('button', 'Create Bucket').wait(WAIT_TIMER).click(); // To trigger a validation
 
     // Waiting for website to decide if name is valid or not
     // Check that name input field was marked invalid in the css
@@ -166,7 +159,7 @@ export class BucketsPageHelper extends PageHelper {
 
     // Clicks the Create Bucket button but the page doesn't move.
     // Done by testing for the breadcrumb
-    cy.contains('button', 'Create Bucket').click(); // Clicks Create Bucket button
+    cy.contains('button', 'Create Bucket').wait(WAIT_TIMER).click(); // Clicks Create Bucket button
     this.expectBreadcrumbText('Create');
     // content in fields seems to subsist through tests if not cleared, so it is cleared
     cy.get('@nameInputField').clear();
@@ -174,7 +167,7 @@ export class BucketsPageHelper extends PageHelper {
   }
 
   testInvalidEdit(name: string) {
-    this.navigateEdit(name);
+    this.navigateEdit(name, false, true, null, true);
 
     cy.get('input[id=versioning]').should('exist').and('not.be.checked');
 

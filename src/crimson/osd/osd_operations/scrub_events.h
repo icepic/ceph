@@ -27,11 +27,11 @@ class RemoteScrubEventBaseT : public PhasedOperationT<T> {
   crimson::net::ConnectionRef l_conn;
   crimson::net::ConnectionXcoreRef r_conn;
 
-  epoch_t epoch;
   spg_t pgid;
 
 protected:
   using interruptor = InterruptibleOperation::interruptor;
+  epoch_t epoch;
 
   template <typename U=void>
   using ifut = InterruptibleOperation::interruptible_future<U>;
@@ -40,7 +40,7 @@ protected:
 public:
   RemoteScrubEventBaseT(
     crimson::net::ConnectionRef conn, epoch_t epoch, spg_t pgid)
-    : l_conn(std::move(conn)), epoch(epoch), pgid(pgid) {}
+    : l_conn(std::move(conn)), pgid(pgid), epoch(epoch) {}
 
   PGPeeringPipeline &get_peering_pipeline(PG &pg);
 
@@ -117,6 +117,10 @@ public:
     : RemoteScrubEventBaseT<ScrubRequested>(std::forward<Args>(base_args)...),
       deep(deep) {}
 
+  epoch_t get_epoch_sent_at() const {
+    return epoch;
+  }
+
   void print(std::ostream &out) const final {
     out << "(deep=" << deep << ")";
   }
@@ -139,6 +143,10 @@ public:
     : RemoteScrubEventBaseT<ScrubMessage>(std::forward<Args>(base_args)...),
       m(m) {
     ceph_assert(scrub::PGScrubber::is_scrub_message(*m));
+  }
+
+  epoch_t get_epoch_sent_at() const {
+    return epoch;
   }
 
   void print(std::ostream &out) const final {
@@ -260,6 +268,17 @@ protected:
   ifut<> run(PG &pg) final;
 };
 
+struct obj_scrub_progress_t {
+  // nullopt once complete
+  std::optional<uint64_t> offset = 0;
+  ceph::buffer::hash data_hash{std::numeric_limits<uint32_t>::max()};
+
+  bool header_done = false;
+  std::optional<std::string> next_key;
+  bool keys_done = false;
+  ceph::buffer::hash omap_hash{std::numeric_limits<uint32_t>::max()};
+};
+
 }
 
 namespace crimson {
@@ -279,6 +298,24 @@ struct EventBackendRegistry<osd::ScrubMessage> {
 };
 
 }
+
+template <>
+struct fmt::formatter<crimson::osd::obj_scrub_progress_t> {
+  constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+  template <typename FormatContext>
+  auto format(const crimson::osd::obj_scrub_progress_t &progress,
+	      FormatContext& ctx) const
+  {
+    return fmt::format_to(
+      ctx.out(),
+      "obj_scrub_progress_t(offset: {}, "
+      "header_done: {}, next_key: {}, keys_done: {})",
+      progress.offset.has_value() ? *progress.offset : 0,
+      progress.header_done,
+      progress.next_key.has_value() ? *progress.next_key : "",
+      progress.keys_done);
+  }
+};
 
 #if FMT_VERSION >= 90000
 template <> struct fmt::formatter<crimson::osd::ScrubRequested>

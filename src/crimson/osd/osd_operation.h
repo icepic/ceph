@@ -40,6 +40,49 @@ struct PerShardPipeline {
   } create_or_wait_pg;
 };
 
+struct PGPeeringPipeline {
+  struct AwaitMap : OrderedExclusivePhaseT<AwaitMap> {
+    static constexpr auto type_name = "PeeringEvent::PGPipeline::await_map";
+  } await_map;
+  struct Process : OrderedExclusivePhaseT<Process> {
+    static constexpr auto type_name = "PeeringEvent::PGPipeline::process";
+  } process;
+};
+
+struct CommonPGPipeline {
+  struct WaitPGReady : OrderedConcurrentPhaseT<WaitPGReady> {
+    static constexpr auto type_name = "CommonPGPipeline:::wait_pg_ready";
+  } wait_pg_ready;
+  struct GetOBC : OrderedExclusivePhaseT<GetOBC> {
+    static constexpr auto type_name = "CommonPGPipeline:::get_obc";
+  } get_obc;
+};
+
+struct PGRepopPipeline {
+  struct Process : OrderedExclusivePhaseT<Process> {
+    static constexpr auto type_name = "PGRepopPipeline::process";
+  } process;
+  struct WaitCommit : OrderedConcurrentPhaseT<WaitCommit> {
+    static constexpr auto type_name = "PGRepopPipeline::wait_repop";
+  } wait_commit;
+  struct SendReply : OrderedExclusivePhaseT<SendReply> {
+    static constexpr auto type_name = "PGRepopPipeline::send_reply";
+  } send_reply;
+};
+
+struct CommonOBCPipeline {
+  struct Process : OrderedExclusivePhaseT<Process> {
+    static constexpr auto type_name = "CommonOBCPipeline::process";
+  } process;
+  struct WaitRepop : OrderedConcurrentPhaseT<WaitRepop> {
+    static constexpr auto type_name = "CommonOBCPipeline::wait_repop";
+  } wait_repop;
+  struct SendReply : OrderedExclusivePhaseT<SendReply> {
+    static constexpr auto type_name = "CommonOBCPipeline::send_reply";
+  } send_reply;
+};
+
+
 enum class OperationTypeCode {
   client_request = 0,
   peering_event,
@@ -50,6 +93,7 @@ enum class OperationTypeCode {
   background_recovery_sub,
   internal_client_request,
   historic_client_request,
+  historic_slow_client_request,
   logmissing_request,
   logmissing_request_reply,
   snaptrim_event,
@@ -72,6 +116,7 @@ static constexpr const char* const OP_NAMES[] = {
   "background_recovery_sub",
   "internal_client_request",
   "historic_client_request",
+  "historic_slow_client_request",
   "logmissing_request",
   "logmissing_request_reply",
   "snaptrim_event",
@@ -172,6 +217,9 @@ protected:
 
 public:
   static constexpr bool is_trackable = true;
+  virtual bool requires_pg() const {
+    return true;
+  }
 };
 
 template <class T>
@@ -225,12 +273,16 @@ struct OSDOperationRegistry : OperationRegistryT<
   void do_stop() override;
 
   void put_historic(const class ClientRequest& op);
+  void _put_historic(
+    op_list& list,
+    const class ClientRequest& op,
+    uint64_t max);
 
   size_t dump_historic_client_requests(ceph::Formatter* f) const;
   size_t dump_slowest_historic_client_requests(ceph::Formatter* f) const;
+  void visit_ops_in_flight(std::function<void(const ClientRequest&)>&& visit);
 
 private:
-  op_list::const_iterator last_of_recents;
   size_t num_recent_ops = 0;
   size_t num_slow_ops = 0;
 };
@@ -288,6 +340,18 @@ public:
     Args&&... args) {
     return trigger.maybe_record_blocking(
       with_throttle_while(std::forward<Args>(args)...), *this);
+  }
+
+  // Returns std::nullopt if the throttle is acquired immediately,
+  // returns the future for the acquiring otherwise
+  std::optional<seastar::future<>>
+  try_acquire_throttle_now(crimson::osd::scheduler::params_t params) {
+    if (!max_in_progress || in_progress < max_in_progress) {
+      ++in_progress;
+      --pending;
+      return std::nullopt;
+    }
+    return acquire_throttle(params);
   }
 
 private:

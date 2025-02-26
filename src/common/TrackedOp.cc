@@ -12,6 +12,9 @@
 
 #include "TrackedOp.h"
 
+#include <shared_mutex> // for std::shared_lock
+#include <sstream>
+
 #define dout_context cct
 #define dout_subsys ceph_subsys_optracker
 #undef dout_prefix
@@ -90,7 +93,7 @@ void OpHistory::_insert_delayed(const utime_t& now, TrackedOpRef op)
   arrived.insert(make_pair(op->get_initiated(), op));
   if (opduration >= history_slow_op_threshold.load()) {
     slow_op.insert(make_pair(op->get_initiated(), op));
-    logger->inc(l_osd_slow_op_count);
+    logger->inc(l_trackedop_slow_op_count);
   }
   cleanup(now);
 }
@@ -204,7 +207,7 @@ void OpHistory::dump_slow_ops(utime_t now, Formatter *f, set<string> filters)
   cleanup(now);
   f->open_object_section("OpHistory slow ops");
   f->dump_int("num to keep", history_slow_op_size.load());
-  f->dump_int("threshold to keep", history_slow_op_threshold.load());
+  f->dump_float("threshold to keep", history_slow_op_threshold.load());
   {
     f->open_array_section("Ops");
     for ([[maybe_unused]] const auto& [t, op] : slow_op) {
@@ -339,12 +342,15 @@ bool OpTracker::visit_ops_in_flight(utime_t* oldest_secs,
   for (const auto sdata : sharded_in_flight_list) {
     ceph_assert(sdata);
     std::lock_guard locker(sdata->ops_in_flight_lock_sharded);
-    if (!sdata->ops_in_flight_sharded.empty()) {
-      utime_t oldest_op_tmp =
-	sdata->ops_in_flight_sharded.front().get_initiated();
+    for (auto& op : sdata->ops_in_flight_sharded) {
+      if (!op.warn_interval_multiplier || op.is_continuous())
+	continue;
+
+      utime_t oldest_op_tmp = op.get_initiated();
       if (oldest_op_tmp < oldest_op) {
         oldest_op = oldest_op_tmp;
       }
+      break;
     }
     std::transform(std::begin(sdata->ops_in_flight_sharded),
                    std::end(sdata->ops_in_flight_sharded),

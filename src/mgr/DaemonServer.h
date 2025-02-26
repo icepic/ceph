@@ -16,25 +16,26 @@
 
 #include "PyModuleRegistry.h"
 
+#include <map>
 #include <set>
 #include <string>
-#include <boost/variant.hpp>
+#include <unordered_map>
 
 #include "common/ceph_mutex.h"
 #include "common/LogClient.h"
 #include "common/Timer.h"
-
-#include <msg/Messenger.h>
-#include <mon/MonClient.h>
+#include "common/TrackedOp.h" // for class OpTracker
+#include "include/utime.h"
 
 #include "ServiceMap.h"
-#include "MgrSession.h"
-#include "DaemonState.h"
 #include "MetricCollector.h"
 #include "OSDPerfMetricCollector.h"
 #include "MDSPerfMetricCollector.h"
-#include "MgrOpRequest.h"
 
+#include <boost/scoped_ptr.hpp>
+
+class DaemonStateIndex;
+class Messenger;
 class MMgrReport;
 class MMgrOpen;
 class MMgrUpdate;
@@ -42,7 +43,9 @@ class MMgrClose;
 class MMonMgrReport;
 class MCommand;
 class MMgrCommand;
+class MgrSession;
 struct MonCommand;
+class MonClient;
 class CommandContext;
 struct OSDPerfMetricQuery;
 struct MDSPerfMetricQuery;
@@ -147,7 +150,7 @@ protected:
   std::set<ConnectionRef> daemon_connections;
 
   /// connections for osds
-  ceph::unordered_map<int,std::set<ConnectionRef>> osd_cons;
+  std::unordered_map<int, std::set<ConnectionRef>> osd_cons;
 
   ServiceMap pending_service_map;  // uncommitted
 
@@ -272,7 +275,7 @@ public:
   ~DaemonServer() override;
 
   bool ms_dispatch2(const ceph::ref_t<Message>& m) override;
-  int ms_handle_fast_authentication(Connection *con) override;
+  bool ms_handle_fast_authentication(Connection *con) override;
   void ms_handle_accept(Connection *con) override;
   bool ms_handle_reset(Connection *con) override;
   void ms_handle_remote_reset(Connection *con) override {}

@@ -29,6 +29,12 @@
 
 #define RW_IO_MAX (INT_MAX & CEPH_PAGE_MASK)
 
+enum {
+  l_blk_kernel_device_first = 1000,
+  l_blk_kernel_device_discard_op,
+  l_blk_kernel_device_last,
+};
+
 class KernelDevice : public BlockDevice,
                      public md_config_obs_t {
 protected:
@@ -52,10 +58,12 @@ private:
   aio_callback_t discard_callback;
   void *discard_callback_priv;
   bool aio_stop;
+  bool need_notify = false;
+  std::unique_ptr<PerfCounters> logger;
 
   ceph::mutex discard_lock = ceph::make_mutex("KernelDevice::discard_lock");
   ceph::condition_variable discard_cond;
-  bool discard_running = false;
+  int discard_running = 0;
   interval_set<uint64_t> discard_queued;
 
   struct AioCompletionThread : public Thread {
@@ -78,7 +86,6 @@ private:
     }
   };
   std::vector<std::shared_ptr<DiscardThread>> discard_threads;
-  uint64_t target_discard_threads = 0;
 
   std::atomic_int injecting_crash;
 
@@ -87,13 +94,13 @@ private:
 
   void _aio_thread();
   void _discard_thread(uint64_t tid);
-  void _queue_discard(interval_set<uint64_t> &to_release);
+  bool _queue_discard(interval_set<uint64_t> &to_release);
   bool try_discard(interval_set<uint64_t> &to_release, bool async = true) override;
 
   int _aio_start();
   void _aio_stop();
 
-  void _discard_start();
+  void _discard_update_threads(bool discard_stop = false);
   void _discard_stop();
   bool _discard_started();
 
@@ -119,12 +126,13 @@ private:
   ceph::unique_leakable_ptr<buffer::raw> create_custom_aligned(size_t len, IOContext* ioc) const;
 
 public:
-  KernelDevice(CephContext* cct, aio_callback_t cb, void *cbpriv, aio_callback_t d_cb, void *d_cbpriv);
+  KernelDevice(CephContext* cct, aio_callback_t cb, void *cbpriv, aio_callback_t d_cb,
+    void *d_cbpriv, const char* dev_name = "");
   ~KernelDevice();
 
   void aio_submit(IOContext *ioc) override;
   void discard_drain() override;
-
+  void swap_discard_queued(interval_set<uint64_t>& other) override;
   int collect_metadata(const std::string& prefix, std::map<std::string,std::string> *pm) const override;
   int get_devname(std::string *s) const override {
     if (devname.empty()) {

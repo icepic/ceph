@@ -347,7 +347,7 @@ void EventCenter::wakeup()
     return ;
 
   ldout(cct, 20) << __func__ << dendl;
-  char buf = 'c';
+  static constexpr char buf = 'c';
   // wake up "event_wait"
   #ifdef _WIN32
   int n = send(notify_send_fd, &buf, sizeof(buf), 0);
@@ -404,6 +404,8 @@ int EventCenter::process_events(unsigned timeout_microseconds,  ceph::timespan *
 
     if (end_time > now) {
       timeout_microseconds = std::chrono::duration_cast<std::chrono::microseconds>(end_time - now).count();
+      timeout_microseconds = std::max<unsigned>(timeout_microseconds,
+                                                cct->_conf->ms_time_events_min_wait_interval);
     } else {
       timeout_microseconds = 0;
     }

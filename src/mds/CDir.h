@@ -403,10 +403,7 @@ public:
   void split(int bits, std::vector<CDir*>* subs, MDSContext::vec& waiters, bool replay);
   void merge(const std::vector<CDir*>& subs, MDSContext::vec& waiters, bool replay);
 
-  bool should_split() const {
-    return g_conf()->mds_bal_split_size > 0 &&
-      ((int)get_frag_size() + (int)get_num_snap_items()) > g_conf()->mds_bal_split_size;
-  }
+  bool should_split() const;
   bool should_split_fast() const;
   bool should_merge() const;
 
@@ -548,6 +545,16 @@ public:
   void unfreeze_dir();
 
   void maybe_finish_freeze();
+
+  size_t count_unfreeze_tree_waiters() {
+    size_t n = count_unfreeze_dir_waiters();
+    _walk_tree([&n](CDir *dir) {
+        n += dir->count_unfreeze_dir_waiters();
+        return true;
+      });
+    return n;
+  }
+  inline size_t count_unfreeze_dir_waiters() const { return count_waiters(WAIT_UNFREEZE); }
 
   std::pair<bool,bool> is_freezing_or_frozen_tree() const {
     if (freeze_tree_state) {

@@ -131,7 +131,21 @@ doesn't use ``cephadm shell``) to a version compatible with the new version.
 Potential problems
 ==================
 
-There are a few health alerts that can arise during the upgrade process.
+
+Error: ENOENT: Module not found
+-------------------------------
+
+The message ``Error ENOENT: Module not found`` appears in response to the command ``ceph orch upgrade status`` if the orchestrator has crashed:
+
+.. prompt:: bash #
+
+   ceph orch upgrade status
+
+::
+
+   Error ENOENT: Module not found
+
+This is possibly caused by invalid JSON in a mgr config-key. See `Redmine tracker Issue #67329 <https://tracker.ceph.com/issues/67329>`_ and `the discussion on the [ceph-users] mailing list <https://www.spinics.net/lists/ceph-users/msg83667.html>`_.
 
 UPGRADE_NO_STANDBY_MGR
 ----------------------
@@ -193,7 +207,7 @@ you need. For example, the following command upgrades to a development build:
 
 .. prompt:: bash #
 
-  ceph orch upgrade start --image quay.io/ceph-ci/ceph:recent-git-branch-name
+  ceph orch upgrade start --image quay.ceph.io/ceph-ci/ceph:recent-git-branch-name
 
 For more information about available container images, see :ref:`containers`.
 
@@ -293,3 +307,19 @@ upgrading:
 
 You should now have all your Manager daemons on the new version and be able to
 specify the limiting parameters for the rest of the upgrade.
+
+
+Updating a non-Ceph image service with custom image
+====================================================
+
+To update a non-Ceph image service, run a command of the following form:
+
+.. prompt:: bash #
+
+  ceph orch update service <service_type> <image>
+
+For example:
+
+.. prompt:: bash #
+
+  ceph orch update service prometheus quay.io/prometheus/prometheus:v2.55.1

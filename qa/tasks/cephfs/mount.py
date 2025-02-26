@@ -775,6 +775,10 @@ class CephFSMountBase(object):
 
         return self.client_remote.run(args=args, **kwargs)
 
+    def get_shell_stdout(self, args, timeout=300, **kwargs):
+        return self.run_shell(args=args, timeout=timeout, **kwargs).stdout.\
+            getvalue().strip()
+
     def run_shell_payload(self, payload, wait=True, timeout=900, **kwargs):
         kwargs.setdefault('cwd', self.mountpoint)
         kwargs.setdefault('omit_sudo', False)
@@ -1560,6 +1564,20 @@ class CephFSMountBase(object):
             # gives you [''] instead of []
             return []
 
+    def removexattr(self, path, key, **kwargs):
+        """
+        Wrap setfattr removal.
+
+        :param path: relative to mount point
+        :param key: xattr name
+        :return: None
+        """
+        kwargs['args'] = ["setfattr", "-x", key, path]
+        if kwargs.pop('sudo', False):
+            kwargs['args'].insert(0, 'sudo')
+            kwargs['omit_sudo'] = False
+        self.run_shell(**kwargs)
+
     def setfattr(self, path, key, val, **kwargs):
         """
         Wrap setfattr.
@@ -1569,7 +1587,7 @@ class CephFSMountBase(object):
         :param val: xattr value
         :return: None
         """
-        kwargs['args'] = ["setfattr", "-n", key, "-v", val, path]
+        kwargs['args'] = ["setfattr", "-n", str(key), "-v", str(val), path]
         if kwargs.pop('sudo', False):
             kwargs['args'].insert(0, 'sudo')
             kwargs['omit_sudo'] = False

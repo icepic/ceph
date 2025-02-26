@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <limits.h>
 
 #include <array>
@@ -34,6 +35,7 @@
 #include "common/ceph_json.h"
 #include "common/ceph_time.h"
 
+#include "rgw_cksum.h"
 #include "rgw_common.h"
 #include "rgw_dmclock.h"
 #include "rgw_sal.h"
@@ -81,6 +83,10 @@ int rgw_op_get_bucket_policy_from_attr(const DoutPrefixProvider *dpp,
                                        std::map<std::string, bufferlist>& bucket_attrs,
                                        RGWAccessControlPolicy& policy,
                                        optional_yield y);
+
+std::tuple<bool, bool> rgw_check_policy_condition(const DoutPrefixProvider *dpp, req_state* s, bool check_obj_exist_tag=true);
+
+int rgw_iam_add_buckettags(const DoutPrefixProvider *dpp, req_state* s);
 
 class RGWHandler {
 protected:
@@ -295,6 +301,7 @@ public:
   }
   virtual const char* name() const = 0;
   virtual RGWOpType get_type() { return RGW_OP_UNKNOWN; }
+  virtual std::string canonical_name() const { return fmt::format("REST.{}.{}", s->info.method, name()); }
 
   virtual uint32_t op_mask() { return 0; }
 
@@ -973,18 +980,6 @@ public:
   virtual bool need_container_stats() { return false; }
 };
 
-class RGWGetBucketLogging : public RGWOp {
-public:
-  RGWGetBucketLogging() {}
-  int verify_permission(optional_yield y) override;
-  void execute(optional_yield) override { }
-
-  void send_response() override = 0;
-  const char* name() const override { return "get_bucket_logging"; }
-  RGWOpType get_type() override { return RGW_OP_GET_BUCKET_LOGGING; }
-  uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
-};
-
 class RGWGetBucketLocation : public RGWOp {
 public:
   RGWGetBucketLocation() {}
@@ -1093,14 +1088,15 @@ public:
 
 class RGWStatBucket : public RGWOp {
 protected:
-  std::unique_ptr<rgw::sal::Bucket> bucket;
   RGWStorageStats stats;
+  bool report_stats{true};
 
 public:
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
 
+  virtual int get_params(optional_yield y) = 0;
   void send_response() override = 0;
   const char* name() const override { return "stat_bucket"; }
   RGWOpType get_type() override { return RGW_OP_STAT_BUCKET; }
@@ -1116,6 +1112,7 @@ class RGWCreateBucket : public RGWOp {
   bool relaxed_region_enforcement = false;
   RGWCORSConfiguration cors_config;
   std::set<std::string> rmattr_names;
+  bufferlist in_data;
 
   virtual bool need_metadata_upload() const { return false; }
 
@@ -1218,6 +1215,7 @@ protected:
   std::string copy_source;
   const char *copy_source_range;
   RGWBucketInfo copy_source_bucket_info;
+  rgw::sal::Attrs copy_source_bucket_attrs;
   std::string copy_source_tenant_name;
   std::string copy_source_bucket_name;
   std::string copy_source_object_name;
@@ -1227,7 +1225,7 @@ protected:
   std::string etag;
   bool chunked_upload;
   RGWAccessControlPolicy policy;
-  std::unique_ptr <RGWObjTags> obj_tags;
+  RGWObjTags obj_tags;
   const char *dlo_manifest;
   RGWSLOInfo *slo_info;
   rgw::sal::Attrs attrs;
@@ -1241,6 +1239,7 @@ protected:
   std::string multipart_upload_id;
   std::string multipart_part_str;
   int multipart_part_num = 0;
+  rgw::cksum::Type multipart_cksum_type{rgw::cksum::Type::none};
   jspan_ptr multipart_trace;
 
   boost::optional<ceph::real_time> delete_at;
@@ -1252,6 +1251,8 @@ protected:
   //object lock
   RGWObjectRetention *obj_retention;
   RGWObjectLegalHold *obj_legal_hold;
+
+  std::optional<rgw::cksum::Cksum> cksum;
 
 public:
   RGWPutObj() : ofs(0),
@@ -1332,6 +1333,7 @@ protected:
   RGWAccessControlPolicy policy;
   std::map<std::string, bufferlist> attrs;
   boost::optional<ceph::real_time> delete_at;
+  std::optional<rgw::cksum::Cksum> cksum;
 
   /* Must be called after get_data() or the result is undefined. */
   virtual std::string get_current_filename() const = 0;
@@ -1454,6 +1456,25 @@ public:
   RGWOpType get_type() override { return RGW_OP_PUT_METADATA_OBJECT; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
   virtual bool need_object_expiration() { return false; }
+};
+
+class RGWRestoreObj : public RGWOp {
+protected:
+  std::optional<uint64_t> expiry_days;
+  int restore_ret;
+public:
+  RGWRestoreObj() {}
+
+  int init_processing(optional_yield y) override;
+  int verify_permission(optional_yield y) override;
+  void pre_exec() override;
+  void execute(optional_yield y) override;
+  virtual int get_params(optional_yield y) {return 0;}
+
+  void send_response() override = 0;
+  const char* name() const override { return "restore_obj"; }
+  RGWOpType get_type() override { return RGW_OP_RESTORE_OBJ; }
+  uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
 };
 
 class RGWDeleteObj : public RGWOp {
@@ -1625,6 +1646,50 @@ public:
   RGWOpType get_type() override { return RGW_OP_PUT_ACLS; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
 };
+
+class RGWGetObjAttrs : public RGWGetObj {
+protected:
+  std::string version_id;
+  std::string expected_bucket_owner;
+  std::optional<int> marker;
+  std::optional<int> max_parts;
+  uint16_t requested_attributes{0};
+#if 0
+  /* used to decrypt attributes for objects stored with SSE-C */
+  x-amz-server-side-encryption-customer-algorithm
+  x-amz-server-side-encryption-customer-key
+  x-amz-server-side-encryption-customer-key-MD5
+#endif
+public:
+
+  enum class ReqAttributes : uint16_t {
+    None = 0,
+    Etag,
+    Checksum,
+    ObjectParts,
+    StorageClass,
+    ObjectSize
+  };
+
+  static uint16_t as_flag(ReqAttributes attr) {
+    return 1 << (uint16_t(attr) ? uint16_t(attr) - 1 : 0);
+  }
+
+  static uint16_t recognize_attrs(const std::string& hdr, uint16_t deflt = 0);
+
+  RGWGetObjAttrs() : RGWGetObj()
+  {
+    RGWGetObj::get_data = false; // it's extra false
+  }
+
+  int verify_permission(optional_yield y) override;
+  void pre_exec() override;
+  void execute(optional_yield y) override;
+  void send_response() override = 0;
+  const char* name() const override { return "get_obj_attrs"; }
+  RGWOpType get_type() override { return RGW_OP_GET_OBJ_ATTRS; }
+  uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
+}; /* RGWGetObjAttrs */
 
 class RGWGetLC : public RGWOp {
 protected:
@@ -1839,6 +1904,7 @@ public:
 
 class RGWInitMultipart : public RGWOp {
 protected:
+  RGWObjTags obj_tags;
   std::string upload_id;
   RGWAccessControlPolicy policy;
   ceph::real_time mtime;
@@ -1846,6 +1912,8 @@ protected:
   //object lock
   std::optional<RGWObjectRetention> obj_retention = std::nullopt;
   std::optional<RGWObjectLegalHold> obj_legal_hold = std::nullopt;
+  rgw::sal::Attrs attrs;
+  rgw::cksum::Type cksum_algo{rgw::cksum::Type::none};
 
 public:
   RGWInitMultipart() {}
@@ -1872,6 +1940,10 @@ protected:
   jspan_ptr multipart_trace;
   ceph::real_time upload_time;
   std::unique_ptr<rgw::sal::Notification> res;
+  std::unique_ptr<rgw::sal::Object> meta_obj;
+  std::optional<rgw::cksum::Cksum> cksum;
+  std::optional<std::string> armored_cksum;
+  off_t ofs = 0;
 
 public:
   RGWCompleteMultipart() {}
@@ -1915,6 +1987,7 @@ protected:
   RGWAccessControlPolicy policy;
   bool truncated;
   rgw_placement_rule* placement;
+  std::optional<rgw::cksum::Cksum> cksum;
 
 public:
   RGWListMultipart() {
@@ -2027,24 +2100,7 @@ class RGWDeleteMultiObj : public RGWOp {
    * Handles the deletion of an individual object and uses
    * set_partial_response to record the outcome.
    */
-  void handle_individual_object(const rgw_obj_key& o,
-				optional_yield y,
-                                boost::asio::deadline_timer *formatter_flush_cond);
-
-  /**
-   * When the request is being executed in a coroutine, performs
-   * the actual formatter flushing and is responsible for the
-   * termination condition (when when all partial object responses
-   * have been sent). Note that the formatter flushing must be handled
-   * on the coroutine that invokes the execute method vs. the
-   * coroutines that are spawned to handle individual objects because
-   * the flush logic uses a yield context that was captured
-   * and saved on the req_state vs. one that is passed on the stack.
-   * This is a no-op in the case where we're not executing as a coroutine.
-   */
-  void wait_flush(optional_yield y,
-                  boost::asio::deadline_timer *formatter_flush_cond,
-                  std::function<bool()> predicate);
+  void handle_individual_object(const rgw_obj_key& o, optional_yield y);
 
 protected:
   std::vector<delete_multi_obj_entry> ops_log_entries;
@@ -2067,13 +2123,14 @@ public:
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
+  void send_response() override;
 
   virtual int get_params(optional_yield y) = 0;
   virtual void send_status() = 0;
   virtual void begin_response() = 0;
   virtual void send_partial_response(const rgw_obj_key& key, bool delete_marker,
-                                     const std::string& marker_version_id, int ret,
-                                     boost::asio::deadline_timer *formatter_flush_cond) = 0;
+                                     const std::string& marker_version_id,
+                                     int ret) = 0;
   virtual void end_response() = 0;
   const char* name() const override { return "multi_object_delete"; }
   RGWOpType get_type() override { return RGW_OP_DELETE_MULTI_OBJ; }
@@ -2168,7 +2225,12 @@ inline int rgw_get_request_metadata(const DoutPrefixProvider *dpp,
       "x-amz-server-side-encryption-customer-algorithm",
       "x-amz-server-side-encryption-customer-key",
       "x-amz-server-side-encryption-customer-key-md5",
-      "x-amz-storage-class"
+      /* XXX agreed w/cbodley that probably a cleanup is needed here--we probably
+       * don't want to store these, esp. under user.rgw */
+      "x-amz-storage-class",
+      "x-amz-content-sha256",
+      "x-amz-checksum-algorithm",
+      "x-amz-date"
   };
 
   size_t valid_meta_count = 0;
@@ -2234,18 +2296,14 @@ inline void encode_delete_at_attr(boost::optional<ceph::real_time> delete_at,
   attrs[RGW_ATTR_DELETE_AT] = delatbl;
 } /* encode_delete_at_attr */
 
-inline void encode_obj_tags_attr(RGWObjTags* obj_tags, std::map<std::string, bufferlist>& attrs)
+inline void encode_obj_tags_attr(const RGWObjTags& obj_tags, std::map<std::string, bufferlist>& attrs)
 {
-  if (obj_tags == nullptr){
-    // we assume the user submitted a tag format which we couldn't parse since
-    // this wouldn't be parsed later by get/put obj tags, lets delete if the
-    // attr was populated
+  if (obj_tags.empty()) {
     return;
   }
-
   bufferlist tagsbl;
-  obj_tags->encode(tagsbl);
-  attrs[RGW_ATTR_TAGS] = tagsbl;
+  obj_tags.encode(tagsbl);
+  attrs[RGW_ATTR_TAGS] = std::move(tagsbl);
 }
 
 inline int encode_dlo_manifest_attr(const char * const dlo_manifest,

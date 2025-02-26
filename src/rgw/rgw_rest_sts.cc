@@ -3,6 +3,7 @@
 #include <vector>
 #include <string>
 #include <array>
+#include <iomanip>
 #include <string_view>
 #include <sstream>
 #include <memory>
@@ -315,7 +316,7 @@ WebTokenEngine::get_cert_url(const string& iss, const DoutPrefixProvider *dpp, o
   //Headers
   openidc_req.append_header("Content-Type", "application/x-www-form-urlencoded");
 
-  int res = openidc_req.process(y);
+  int res = openidc_req.process(dpp, y);
   if (res < 0) {
     ldpp_dout(dpp, 10) << "HTTP request res: " << res << dendl;
     throw -EINVAL;
@@ -353,7 +354,7 @@ WebTokenEngine::validate_signature(const DoutPrefixProvider* dpp, const jwt::dec
     //Headers
     cert_req.append_header("Content-Type", "application/x-www-form-urlencoded");
 
-    int res = cert_req.process(y);
+    int res = cert_req.process(dpp, y);
     if (res < 0) {
       ldpp_dout(dpp, 10) << "HTTP request res: " << res << dendl;
       throw -EINVAL;
@@ -384,7 +385,6 @@ WebTokenEngine::validate_signature(const DoutPrefixProvider* dpp, const jwt::dec
                found_valid_cert = true;
                break;
               }
-              found_valid_cert = true;
             }
             if (! found_valid_cert) {
               ldpp_dout(dpp, 0) << "Cert doesn't match that with the thumbprints registered with oidc provider: " << cert.c_str() << dendl;
@@ -437,6 +437,9 @@ WebTokenEngine::validate_signature(const DoutPrefixProvider* dpp, const jwt::dec
                               .allow_algorithm(jwt::algorithm::ps512{cert});
 
                 verifier.verify(decoded);
+              } else {
+                ldpp_dout(dpp, 0) << "Unsupported algorithm: " << algorithm << dendl;
+                throw -EINVAL;
               }
             } catch (std::runtime_error& e) {
               ldpp_dout(dpp, 0) << "Signature validation failed: " << e.what() << dendl;
@@ -497,7 +500,7 @@ WebTokenEngine::authenticate( const DoutPrefixProvider* dpp,
       }
 
       std::unique_ptr<rgw::sal::RGWRole> role = driver->get_role(role_name, role_tenant, role_account);
-      int ret = role->get(dpp, y);
+      int ret = role->load_by_name(dpp, y);
       if (ret < 0) {
         ldpp_dout(dpp, 0) << "Role not found: name:" << role_name << " tenant: " << role_tenant << dendl;
         return result_t::deny(-EACCES);

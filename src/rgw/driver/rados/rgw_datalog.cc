@@ -1,6 +1,7 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab ft=cpp
 
+#include <shared_mutex> // for std::shared_lock
 #include <vector>
 
 #include "common/async/yield_context.h"
@@ -576,7 +577,7 @@ int RGWDataChangesLog::renew_entries(const DoutPrefixProvider *dpp)
     if (ret < 0) {
       /* we don't really need to have a special handling for failed cases here,
        * as this is just an optimization. */
-      ldpp_dout(dpp, -1) << "ERROR: svc.cls->timelog.add() returned " << ret << dendl;
+      ldpp_dout(dpp, -1) << "ERROR: be->push() returned " << ret << dendl;
       return ret;
     }
 

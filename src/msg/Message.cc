@@ -1,6 +1,8 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
 // vim: ts=8 sw=2 smarttab
 
+#include "Message.h"
+
 #ifdef ENCODE_DUMP
 # include <typeinfo>
 # include <cxxabi.h>
@@ -11,8 +13,6 @@
 #include "include/types.h"
 
 #include "global/global_context.h"
-
-#include "Message.h"
 
 #include "messages/MPGStats.h"
 
@@ -205,7 +205,9 @@
 #include "messages/MTimeCheck.h"
 #include "messages/MTimeCheck2.h"
 
+#include "common/ceph_context.h"
 #include "common/config.h"
+#include "common/debug.h"
 
 #include "messages/MOSDPGPush.h"
 #include "messages/MOSDPGPushReply.h"
@@ -218,6 +220,11 @@
 
 #include "messages/MOSDPGUpdateLogMissing.h"
 #include "messages/MOSDPGUpdateLogMissingReply.h"
+
+#include "messages/MOSDPGPCT.h"
+
+#include "messages/MNVMeofGwBeacon.h"
+#include "messages/MNVMeofGwMap.h"
 
 #ifdef WITH_BLKIN
 #include "Messenger.h"
@@ -545,6 +552,9 @@ Message *decode_message(CephContext *cct,
     break;
   case MSG_OSD_PG_UPDATE_LOG_MISSING_REPLY:
     m = make_message<MOSDPGUpdateLogMissingReply>();
+    break;
+  case MSG_OSD_PG_PCT:
+    m = make_message<MOSDPGPCT>();
     break;
   case CEPH_MSG_OSD_BACKOFF:
     m = make_message<MOSDBackoff>();
@@ -885,6 +895,10 @@ Message *decode_message(CephContext *cct,
     m = make_message<MMgrBeacon>();
     break;
 
+  case MSG_MNVMEOF_GW_BEACON:
+    m = make_message<MNVMeofGwBeacon>();
+  break;
+
   case MSG_MON_MGR_REPORT:
     m = make_message<MMonMgrReport>();
     break;
@@ -944,6 +958,9 @@ Message *decode_message(CephContext *cct,
     m = make_message<MMonHealthChecks>();
     break;
 
+  case MSG_MNVMEOF_GW_MAP:
+    m = make_message<MNVMeofGwMap>();
+    break;
     // -- simple messages without payload --
 
   case CEPH_MSG_SHUTDOWN:
