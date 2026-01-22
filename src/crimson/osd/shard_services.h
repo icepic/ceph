@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -113,9 +113,15 @@ class PerShardState {
   bool stopping = false;
   seastar::future<> stop_registry() {
     assert_core();
-    crimson::get_logger(ceph_subsys_osd).info("PerShardState::{}", __func__);
+    auto& logger = crimson::get_logger(ceph_subsys_osd);
+    logger.info("PerShardState::{}", __func__);
     stopping = true;
-    return registry.stop();
+
+    // First throttler stop and then call registry stop
+    return throttler.stop().then([this, &logger] {
+      logger.debug("Throttler stopped for shard {}", seastar::this_shard_id());
+      return registry.stop();
+    });
   }
 
   // PGMap state
@@ -209,6 +215,12 @@ public:
     PerfCounters *recoverystate_perf,
     crimson::os::FuturizedStore &store,
     OSDState& osd_state);
+
+  void initialize_scheduler(CephContext* cct, bool is_rotational) {
+    throttler.initialize_scheduler(cct, crimson::common::local_conf(), is_rotational, whoami);
+    throttler.start();
+ }
+
 };
 
 /**
@@ -321,7 +333,7 @@ private:
   epoch_t up_thru_wanted = 0;
   seastar::future<> send_alive(epoch_t want);
 
-  const char** get_tracked_conf_keys() const final;
+  std::vector<std::string> get_tracked_keys() const noexcept final;
   void handle_conf_change(
     const ConfigProxy& conf,
     const std::set <std::string> &changed) final;
@@ -481,6 +493,10 @@ public:
     return {get_reactor_utilization()};
   }
 
+  auto create_split_pg_mapping(spg_t pgid, core_id_t core) {
+    return pg_to_shard_mapping.get_or_create_pg_mapping(pgid, core);
+  }
+
   auto remove_pg(spg_t pgid) {
     local_state.pg_map.remove_pg(pgid);
     return pg_to_shard_mapping.remove_pg_mapping(pgid);
@@ -535,6 +551,10 @@ public:
   using wait_for_pg_ret = wait_for_pg_ertr::future<Ref<PG>>;
   wait_for_pg_ret wait_for_pg(
     PGMap::PGCreationBlockingEvent::TriggerI&&, spg_t pgid);
+  wait_for_pg_ret create_split_pg(
+    PGMap::PGCreationBlockingEvent::TriggerI&& trigger,
+    spg_t pgid);
+
   seastar::future<Ref<PG>> load_pg(spg_t pgid);
 
   /// Dispatch and reset ctx transaction
@@ -593,8 +613,7 @@ public:
   }
 
   FORWARD_TO_OSD_SINGLETON(get_pool_info)
-  FORWARD(with_throttle_while, with_throttle_while, local_state.throttler)
-  FORWARD(try_acquire_throttle_now, try_acquire_throttle_now, local_state.throttler)
+  FORWARD(get_throttle, get_throttle, local_state.throttler)
 
   FORWARD_TO_OSD_SINGLETON(build_incremental_map_msg)
   FORWARD_TO_OSD_SINGLETON(send_incremental_map)
@@ -618,6 +637,9 @@ public:
     snap_dump_reservations,
     snap_reserver.dump)
 
+  bool throttle_available() const {
+    return local_state.throttler.available();
+  }
 
   auto local_update_priority(
     singleton_orderer_t &orderer,

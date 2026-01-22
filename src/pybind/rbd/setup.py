@@ -1,11 +1,11 @@
 import os
-import pkgutil
+import importlib.util
 import shutil
 import subprocess
 import sys
 import tempfile
 import textwrap
-if not pkgutil.find_loader('setuptools'):
+if not importlib.util.find_spec('setuptools'):
     from distutils.core import setup
     from distutils.extension import Extension
 else:
@@ -160,6 +160,7 @@ try:
     from Cython.Build import cythonize
     from Cython.Distutils import build_ext
     from Cython import __version__ as cython_version
+    from Cython import Tempita
 
     cmdclass = {'build_ext': build_ext}
 
@@ -183,7 +184,25 @@ except ImportError:
 
         source = "rbd.c"
 else:
-    source = "rbd.pyx"
+    # Process Tempita template
+    source_pyx = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "rbd.pyx"
+    )
+
+    # Read the template from source
+    with open(source_pyx) as f:
+        template_content = f.read()
+
+    # Process the template with cython_constants
+    processed = Tempita.sub(template_content, **cython_constants)
+
+    # Write processed output to current working directory
+    # (which is the build directory when invoked by CMake)
+    source = "rbd_processed.pyx"
+
+    with open(source, 'w') as f:
+        f.write(processed)
 
 # Disable cythonification if we're not really building anything
 if (len(sys.argv) >= 2 and
@@ -205,7 +224,7 @@ setup(
         "of the objects the image is striped over must be a power of two."
     ),
     url='https://github.com/ceph/ceph/tree/master/src/pybind/rbd',
-    license='LGPLv2+',
+    license='LGPL-2.0-or-later',
     platforms='Linux',
     ext_modules=cythonize(
         [
@@ -222,7 +241,6 @@ setup(
     classifiers=[
         'Intended Audience :: Developers',
         'Intended Audience :: System Administrators',
-        'License :: OSI Approved :: GNU Lesser General Public License v2 or later (LGPLv2+)',
         'Operating System :: POSIX :: Linux',
         'Programming Language :: Cython',
         'Programming Language :: Python :: 3'

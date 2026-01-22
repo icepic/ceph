@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -12,7 +13,12 @@
  * 
  */
 
+#include "StrayManager.h"
+#include "BatchOp.h"
+#include "MDSRank.h"
+#include "Mutation.h"
 
+#include "common/debug.h"
 #include "common/perf_counters.h"
 
 #include "mds/MDSRank.h"
@@ -20,11 +26,11 @@
 #include "mds/MDLog.h"
 #include "mds/CDir.h"
 #include "mds/CDentry.h"
+#include "mds/PurgeQueue.h"
 #include "mds/ScrubStack.h"
+#include "mds/SnapRealm.h"
 #include "events/EUpdate.h"
 #include "messages/MClientRequest.h"
-
-#include "StrayManager.h"
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_mds
@@ -578,7 +584,7 @@ void StrayManager::eval_remote(CDentry *remote_dn)
   dout(10) << __func__ << " " << *remote_dn << dendl;
 
   CDentry::linkage_t *dnl = remote_dn->get_projected_linkage();
-  ceph_assert(dnl->is_remote());
+  ceph_assert(dnl->is_remote() || dnl->is_referent_remote());
   CInode *in = dnl->get_inode();
 
   if (!in) {
@@ -609,7 +615,7 @@ class C_RetryEvalRemote : public StrayManagerContext {
       dn->get(CDentry::PIN_PTRWAITER);
     }
     void finish(int r) override {
-      if (dn->get_projected_linkage()->is_remote())
+      if (dn->get_projected_linkage()->is_remote() || dn->get_projected_linkage()->is_referent_remote())
 	sm->eval_remote(dn);
       dn->put(CDentry::PIN_PTRWAITER);
     }

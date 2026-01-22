@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -17,7 +18,7 @@
 
 #include <map>
 #include <list>
-#ifdef WITH_SEASTAR
+#ifdef WITH_CRIMSON
 #include <boost/smart_ptr/local_shared_ptr.hpp>
 #else
 #include <memory>
@@ -31,7 +32,7 @@
 template <class K, class V>
 class SharedLRU {
   CephContext *cct;
-#ifdef WITH_SEASTAR
+#ifdef WITH_CRIMSON
   using VPtr = boost::local_shared_ptr<V>;
   using WeakVPtr = boost::weak_ptr<V>;
 #else

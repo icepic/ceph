@@ -1,14 +1,14 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "./ScrubStore.h"
 #include "osd/osd_types.h"
+#include "common/debug.h"
 #include "common/scrub_types.h"
 #include "include/rados/rados_types.hpp"
 
 #include "pg_scrubber.h"
 
-using std::ostringstream;
 using std::string;
 using std::vector;
 

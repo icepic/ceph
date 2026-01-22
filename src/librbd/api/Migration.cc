@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "librbd/api/Migration.h"
 #include "include/rados/librados.hpp"
@@ -1757,7 +1757,8 @@ int Migration<I>::enable_mirroring(
     return r;
   }
 
-  if (mirror_mode == cls::rbd::MIRROR_MODE_DISABLED) {
+  if (mirror_mode == cls::rbd::MIRROR_MODE_DISABLED ||
+      mirror_mode == cls::rbd::MIRROR_MODE_INIT_ONLY) {
     ldout(m_cct, 10) << "mirroring is not enabled for destination pool"
                      << dendl;
     return 0;

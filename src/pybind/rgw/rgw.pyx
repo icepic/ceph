@@ -9,11 +9,12 @@ from libc.stdlib cimport malloc, realloc, free
 from cstat cimport stat
 cimport libcpp
 
-IF BUILD_DOC:
-    include "mock_rgw.pxi"
-ELSE:
-    from c_rgw cimport *
-    cimport rados
+{{if BUILD_DOC}}
+include "mock_rgw.pxi"
+{{else}}
+from c_rgw cimport *
+cimport rados
+{{endif}}
 
 from collections import namedtuple
 from datetime import datetime
@@ -90,32 +91,36 @@ class WouldBlock(Error):
 class OutOfRange(Error):
     pass
 
-IF UNAME_SYSNAME == "FreeBSD":
-    cdef errno_to_exception =  {
-        errno.EPERM      : PermissionError,
-        errno.ENOENT     : ObjectNotFound,
-        errno.EIO        : IOError,
-        errno.ENOSPC     : NoSpace,
-        errno.EEXIST     : ObjectExists,
-        errno.ENOATTR    : NoData,
-        errno.EINVAL     : InvalidValue,
-        errno.EOPNOTSUPP : OperationNotSupported,
-        errno.ERANGE     : OutOfRange,
-        errno.EWOULDBLOCK: WouldBlock,
-    }
-ELSE:
-    cdef errno_to_exception =  {
-        errno.EPERM      : PermissionError,
-        errno.ENOENT     : ObjectNotFound,
-        errno.EIO        : IOError,
-        errno.ENOSPC     : NoSpace,
-        errno.EEXIST     : ObjectExists,
-        errno.ENODATA    : NoData,
-        errno.EINVAL     : InvalidValue,
-        errno.EOPNOTSUPP : OperationNotSupported,
-        errno.ERANGE     : OutOfRange,
-        errno.EWOULDBLOCK: WouldBlock,
-    }
+
+# Build errno mapping based on platform
+# FreeBSD uses ENOATTR while Linux uses ENODATA
+{{if UNAME_SYSNAME == "FreeBSD"}}
+cdef errno_to_exception =  {
+    errno.EPERM      : PermissionError,
+    errno.ENOENT     : ObjectNotFound,
+    errno.EIO        : IOError,
+    errno.ENOSPC     : NoSpace,
+    errno.EEXIST     : ObjectExists,
+    errno.ENOATTR    : NoData,
+    errno.EINVAL     : InvalidValue,
+    errno.EOPNOTSUPP : OperationNotSupported,
+    errno.ERANGE     : OutOfRange,
+    errno.EWOULDBLOCK: WouldBlock,
+}
+{{else}}
+cdef errno_to_exception =  {
+    errno.EPERM      : PermissionError,
+    errno.ENOENT     : ObjectNotFound,
+    errno.EIO        : IOError,
+    errno.ENOSPC     : NoSpace,
+    errno.EEXIST     : ObjectExists,
+    errno.ENODATA    : NoData,
+    errno.EINVAL     : InvalidValue,
+    errno.EOPNOTSUPP : OperationNotSupported,
+    errno.ERANGE     : OutOfRange,
+    errno.EWOULDBLOCK: WouldBlock,
+}
+{{endif}}
 
 
 cdef class FileHandle(object):
@@ -166,12 +171,12 @@ cdef make_ex(ret, msg):
         return Error(msg + (": error code %d" % ret))
 
 
-cdef bint readdir_cb(const char *name, void *arg, uint64_t offset, stat *st, uint32_t st_mask, uint32_t flags) \
+cdef int readdir_cb(const char *name, void *arg, uint64_t offset, stat *st, uint32_t st_mask, uint32_t flags) \
 except? -9000 with gil:
     if exc.PyErr_Occurred():
-        return False
+        return 0
     (<object>arg)(name, offset, flags)
-    return True
+    return 1
 
 
 class LibCephFSStateError(Error):

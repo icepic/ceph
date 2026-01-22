@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -23,21 +24,22 @@
 #include "include/buffer_fwd.h"
 #include "include/lru.h"
 #include "include/elist.h"
-#include "include/filepath.h"
 #include <boost/intrusive/set.hpp>
 
-#include "BatchOp.h"
 #include "MDSCacheObject.h"
-#include "MDSContext.h"
 #include "SimpleLock.h"
 #include "LocalLockC.h"
-#include "ScrubHeader.h"
+#include "LogSegmentRef.h"
 
+class filepath;
+class BatchOp;
 class CInode;
 class CDir;
 class Locker;
 class CDentry;
 class LogSegment;
+class MDSContext;
+
 class Session;
 
 struct ClientLease : public boost::intrusive::set_base_hook<>
@@ -80,20 +82,26 @@ public:
     CInode *inode = nullptr;
     inodeno_t remote_ino = 0;
     unsigned char remote_d_type = 0;
+    CInode *referent_inode = nullptr;
+    inodeno_t referent_ino = 0;
     
     linkage_t() {}
 
     // dentry type is primary || remote || null
     // inode ptr is required for primary, optional for remote, undefined for null
     bool is_primary() const { return remote_ino == 0 && inode != 0; }
-    bool is_remote() const { return remote_ino > 0; }
-    bool is_null() const { return remote_ino == 0 && inode == 0; }
+    bool is_remote() const { return remote_ino > 0 && referent_inode == nullptr && referent_ino == 0; }
+    bool is_null() const { return remote_ino == 0 && inode == 0 && referent_ino == 0 && referent_inode == nullptr; }
+    bool is_referent_remote() const {return remote_ino > 0 && referent_ino != 0 && referent_inode != nullptr;}
 
     CInode *get_inode() { return inode; }
     const CInode *get_inode() const { return inode; }
     inodeno_t get_remote_ino() const { return remote_ino; }
     unsigned char get_remote_d_type() const { return remote_d_type; }
     std::string get_remote_d_type_string() const;
+    CInode *get_referent_inode() { return referent_inode; }
+    const CInode *get_referent_inode() const { return referent_inode; }
+    inodeno_t get_referent_ino() const { return referent_ino; }
 
     void set_remote(inodeno_t ino, unsigned char d_type) {
       remote_ino = ino;
@@ -126,34 +134,13 @@ public:
 
   CDentry(std::string_view n, __u32 h,
           mempool::mds_co::string alternate_name,
-	  snapid_t f, snapid_t l) :
-    hash(h),
-    first(f), last(l),
-    item_dirty(this),
-    lock(this, &lock_type),
-    versionlock(this, &versionlock_type),
-    name(n),
-    alternate_name(std::move(alternate_name))
-  {}
+	  snapid_t f, snapid_t l);
   CDentry(std::string_view n, __u32 h,
           mempool::mds_co::string alternate_name,
-          inodeno_t ino, unsigned char dt,
-	  snapid_t f, snapid_t l) :
-    hash(h),
-    first(f), last(l),
-    item_dirty(this),
-    lock(this, &lock_type),
-    versionlock(this, &versionlock_type),
-    name(n),
-    alternate_name(std::move(alternate_name))
-  {
-    linkage.remote_ino = ino;
-    linkage.remote_d_type = dt;
-  }
+          inodeno_t ino, inodeno_t referent_ino,
+	  unsigned char dt, snapid_t f, snapid_t l);
 
-  ~CDentry() override {
-    ceph_assert(batch_ops.empty());
-  }
+  ~CDentry() override;
 
   std::string_view pin_name(int p) const override {
     switch (p) {
@@ -210,6 +197,7 @@ public:
     p->remote_d_type = d_type;
   }
   void push_projected_linkage(CInode *inode); 
+  void push_projected_linkage(CInode *referent_inode, inodeno_t remote_ino, inodeno_t referent_ino);
   linkage_t *pop_projected_linkage();
 
   bool is_projected() const { return !projected.empty(); }
@@ -257,16 +245,22 @@ public:
   int get_num_dir_auth_pins() const;
   
   // remote links
-  void link_remote(linkage_t *dnl, CInode *in);
+  void link_remote(linkage_t *dnl, CInode *remote_in, CInode *ref_in=nullptr);
   void unlink_remote(linkage_t *dnl);
   
   // copy cons
   CDentry(const CDentry& m);
-  const CDentry& operator= (const CDentry& right);
+  CDentry& operator=(const CDentry& right) = delete;
 
   // misc
-  void make_path_string(std::string& s, bool projected=false) const;
-  void make_path(filepath& fp, bool projected=false) const;
+  void make_trimmed_path_string(std::string& s, bool projected,
+				int path_comp_count=10) const;
+  void make_path_string(std::string& s, bool projected=false,
+		        int path_comp_count=-1) const;
+  void make_path(filepath& fp, bool projected=false,
+		 int path_comp_count=-1) const;
+  void make_trimmed_path(filepath& fp, bool projected=false,
+			 int path_comp_count=10) const;
 
   // -- version --
   version_t get_version() const { return version; }
@@ -277,8 +271,8 @@ public:
   mds_authority_t authority() const override;
 
   version_t pre_dirty(version_t min=0);
-  void _mark_dirty(LogSegment *ls);
-  void mark_dirty(version_t pv, LogSegment *ls);
+  void _mark_dirty(LogSegmentRef const& ls);
+  void mark_dirty(version_t pv, LogSegmentRef const& ls);
   void mark_clean();
 
   void mark_new();
@@ -316,7 +310,7 @@ public:
   void abort_export() {
     put(PIN_TEMPEXPORTING);
   }
-  void decode_import(ceph::buffer::list::const_iterator& blp, LogSegment *ls) {
+  void decode_import(ceph::buffer::list::const_iterator& blp, LogSegmentRef const& ls) {
     DECODE_START(1, blp);
     decode(first, blp);
     __u32 nstate;

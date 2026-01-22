@@ -39,7 +39,8 @@ import { Step } from 'carbon-components-angular';
 @Component({
   selector: 'cd-create-cluster',
   templateUrl: './create-cluster.component.html',
-  styleUrls: ['./create-cluster.component.scss']
+  styleUrls: ['./create-cluster.component.scss'],
+  standalone: false
 })
 export class CreateClusterComponent implements OnInit, OnDestroy, AfterViewInit {
   @ViewChild('skipConfirmTpl', { static: true })
@@ -150,7 +151,7 @@ export class CreateClusterComponent implements OnInit, OnDestroy, AfterViewInit 
               NotificationType.info,
               $localize`Cluster expansion skipped by user`
             );
-            this.router.navigate(['/dashboard']);
+            this.router.navigate(['/overview']);
             this.modalService.dismissAll();
           }
         });
@@ -178,7 +179,7 @@ export class CreateClusterComponent implements OnInit, OnDestroy, AfterViewInit 
                   NotificationType.success,
                   $localize`Cluster expansion was successful`
                 );
-                this.router.navigate(['/dashboard']);
+                this.router.navigate(['/overview']);
               })
             )
           )

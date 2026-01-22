@@ -11,7 +11,9 @@
 #include "rgw_process_env.h"
 #include "rgw_zone.h"
 #include "rgw_acl.h"
+#ifdef WITH_RADOSGW_RADOS
 #include "rgw_sal_rados.h"
+#endif
 #include "rgw_lua_background.h"
 #include "rgw_perf_counters.h"
 
@@ -782,7 +784,6 @@ void create_top_metatable(lua_State* L, req_state* s, const char* op_name) {
 }
 
 int execute(
-    rgw::sal::Driver* driver,
     RGWREST* rest,
     OpsLogSink* olog,
     req_state* s, 

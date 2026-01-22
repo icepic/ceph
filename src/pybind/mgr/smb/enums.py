@@ -59,10 +59,16 @@ class AuthMode(_StrEnum):
     ACTIVE_DIRECTORY = 'active-directory'
 
 
+class SourceReferenceType(_StrEnum):
+    RESOURCE = 'resource'
+
+
+# NOTE: Use SourceReferenceType for new source objects
 class JoinSourceType(_StrEnum):
     RESOURCE = 'resource'
 
 
+# NOTE: Use SourceReferenceType for new source objects
 class UserGroupSourceType(_StrEnum):
     RESOURCE = 'resource'
     EMPTY = 'empty'
@@ -73,6 +79,7 @@ class ConfigNS(_StrEnum):
     SHARES = 'shares'
     USERS_AND_GROUPS = 'users_and_groups'
     JOIN_AUTHS = 'join_auths'
+    TLS_CREDENTIALS = 'tls_creds'
 
 
 class LoginCategory(_StrEnum):
@@ -102,3 +109,38 @@ class SMBClustering(_StrEnum):
     DEFAULT = 'default'
     ALWAYS = 'always'
     NEVER = 'never'
+
+
+class ShowResults(_StrEnum):
+    FULL = 'full'
+    COLLAPSED = 'collapsed'
+
+
+class PasswordFilter(_StrEnum):
+    """Filter type for password values."""
+
+    NONE = 'none'
+    BASE64 = 'base64'
+    HIDDEN = 'hidden'
+
+
+class InputPasswordFilter(_StrEnum):
+    """Filter type for input password values."""
+
+    NONE = 'none'
+    BASE64 = 'base64'
+
+    def to_password_filter(self) -> PasswordFilter:
+        """Convert input password filter to password filter type."""
+        # This is because python doesn't allow extending enums (with values)
+        # but we want a InputPasswordFilter to be a strict subset of the
+        # password filter enum.
+        return PasswordFilter(self.value)
+
+
+class TLSCredentialType(_StrEnum):
+    """Specify the type of a TLS credential."""
+
+    CERT = 'cert'
+    KEY = 'key'
+    CA_CERT = 'ca-cert'

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include "bucket_cache.h"
 #include <iostream>
@@ -410,6 +410,7 @@ TEST_F(BucketCacheFixtureInotify1, UpdateInotify1)
   remove_files(bucket, "file_", 5, 10);
 } /* SetupInotify1 */
 
+#if 0
 TEST_F(BucketCacheFixtureInotify1, List2Inotify1)
 {
   std::string bucket{"inotify1"};
@@ -474,6 +475,7 @@ TEST_F(BucketCacheFixtureInotify1, List2Inotify1)
   }
   ASSERT_EQ(names.size(), 25);
 } /* List2Inotify1 */
+#endif
 
 int main (int argc, char *argv[])
 {

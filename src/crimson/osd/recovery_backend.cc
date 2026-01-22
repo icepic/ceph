@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <fmt/format.h>
 
@@ -15,6 +15,8 @@
 #include "osd/osd_types.h"
 
 SET_SUBSYS(osd);
+
+namespace crimson::osd {
 
 hobject_t RecoveryBackend::get_temp_recovery_object(
   const hobject_t& target,
@@ -50,16 +52,15 @@ void RecoveryBackend::clean_up(ceph::os::Transaction& t,
   });
   clear_temp_objs();
 
+  replica_push_targets.clear();
+
   for (auto& [soid, recovery_waiter] : recovering) {
-    if ((recovery_waiter->pull_info
-         && recovery_waiter->pull_info->is_complete())
-	|| (!recovery_waiter->pull_info
-	  && recovery_waiter->obc && recovery_waiter->obc->obs.exists)) {
+    if (recovery_waiter->obc) {
       recovery_waiter->obc->interrupt(
 	  ::crimson::common::actingset_changed(
 	      pg.is_primary()));
-      recovery_waiter->interrupt(why);
     }
+    recovery_waiter->interrupt(why);
   }
   recovering.clear();
 }
@@ -89,7 +90,7 @@ void RecoveryBackend::WaitForObjectRecovery::interrupt(interrupt_cause_t why) {
     pushes.clear();
     break;
   default:
-    ceph_abort("impossible");
+    ceph_abort_msg("impossible");
     break;
   }
 }
@@ -220,63 +221,138 @@ RecoveryBackend::handle_backfill_remove(
       pg.get_collection_ref(), std::move(t)).or_terminate());
 }
 
-RecoveryBackend::interruptible_future<BackfillInterval>
-RecoveryBackend::scan_for_backfill(
-  const hobject_t& start,
+RecoveryBackend::interruptible_future<PrimaryBackfillInterval>
+RecoveryBackend::scan_for_backfill_primary(
+  const hobject_t start,
+  [[maybe_unused]] const std::int64_t min,
+  const std::int64_t max,
+  const std::set<pg_shard_t> &backfill_targets)
+{
+  LOG_PREFIX(RecoveryBackend::scan_for_backfill_primary);
+  DEBUGDPP("starting from {}", pg, start);
+  auto version_map = seastar::make_lw_shared<std::multimap<hobject_t,
+		       std::pair<shard_id_t,eversion_t>>>();
+  auto&& [objects, next] = co_await backend->list_objects(start, max);
+  co_await interruptor::parallel_for_each(objects,
+    seastar::coroutine::lambda([FNAME, this, version_map, backfill_targets]
+    (const hobject_t& object) -> interruptible_future<> {
+    DEBUGDPP("querying obj:{}", pg, object);
+    auto obc_manager = pg.obc_loader.get_obc_manager(
+      object, /* resolve_clone = */ false);
+
+    auto found = co_await pg.obc_loader.load_and_lock(
+      obc_manager, RWState::RWREAD
+    ).si_then([] {
+      return true;
+    }).handle_error_interruptible(
+      crimson::ct_error::enoent::handle([](auto) {
+	return false;
+      }),
+      crimson::ct_error::assert_all(fmt::format("{} {} error when loading obc", pg, FNAME).c_str())
+    );
+    if (!found) {
+      // if the object does not exist here, it must have been removed
+      // between the collection_list_partial and here.  This can happen
+      // for the first item in the range, which is usually last_backfill.
+      co_return;
+    }
+
+    if (obc_manager.get_obc()->obs.exists) {
+      auto version = obc_manager.get_obc()->obs.oi.version;
+      auto shard_versions = obc_manager.get_obc()->obs.oi.shard_versions;
+      if (shard_versions.empty()) {
+	version_map->emplace(object, std::make_pair(shard_id_t::NO_SHARD,
+						    version));
+      } else {
+	bool added_default = false;
+	for (auto & shard: backfill_targets) {
+	  if (shard_versions.contains(shard.shard)) {
+	    auto shard_version = shard_versions.at(shard.shard);
+	    version_map->emplace(object, std::make_pair(shard.shard,
+							shard_version));
+	  } else if (!added_default) {
+	    version_map->emplace(object, std::make_pair(shard_id_t::NO_SHARD,
+							version));
+	    added_default = true;
+	  }
+	}
+      }
+      DEBUGDPP("found: {}  {}", pg,
+               object, version);
+      co_return;
+    } else {
+      // if the object does not exist here, it must have been removed
+      // between the collection_list_partial and here.  This can happen
+      // for the first item in the range, which is usually last_backfill.
+      co_return;
+    }
+  }));
+  PrimaryBackfillInterval bi;
+  bi.begin = std::move(start);
+  bi.end = std::move(next);
+  bi.objects = std::move(*version_map);
+  DEBUGDPP("{} PrimaryBackfillInterval filled, leaving, {}",
+           "scan_for_backfill_primary",
+           pg, bi);
+  co_return std::move(bi);
+}
+
+RecoveryBackend::interruptible_future<ReplicaBackfillInterval>
+RecoveryBackend::scan_for_backfill_replica(
+  const hobject_t start,
   [[maybe_unused]] const std::int64_t min,
   const std::int64_t max)
 {
-  LOG_PREFIX(RecoveryBackend::scan_for_backfill);
+  LOG_PREFIX(RecoveryBackend::scan_for_backfill_replica);
   DEBUGDPP("starting from {}", pg, start);
-  auto version_map = seastar::make_lw_shared<std::map<hobject_t, eversion_t>>();
-  return backend->list_objects(start, max).then_interruptible(
-    [FNAME, this, start, version_map] (auto&& ret) {
-    auto&& [objects, next] = std::move(ret);
-    return seastar::do_with(
-      std::move(objects),
-      [FNAME, this, version_map](auto &objects) {
-      return interruptor::parallel_for_each(objects,
-        [FNAME, this, version_map] (const hobject_t& object)
-	-> interruptible_future<> {
-	crimson::osd::ObjectContextRef obc;
-	if (pg.is_primary()) {
-	  obc = pg.obc_registry.maybe_get_cached_obc(object);
-	}
-	if (obc) {
-	  if (obc->obs.exists) {
-	    DEBUGDPP("found (primary): {}  {}",
-		     pg, object, obc->obs.oi.version);
-	    version_map->emplace(object, obc->obs.oi.version);
-	  } else {
-	    // if the object does not exist here, it must have been removed
-	    // between the collection_list_partial and here.  This can happen
-	    // for the first item in the range, which is usually last_backfill.
-	  }
-	  return seastar::now();
-	} else {
-	  return backend->load_metadata(object).safe_then_interruptible(
-	    [FNAME, this, version_map, object] (auto md) {
-	    if (md->os.exists) {
-	      DEBUGDPP("found: {}  {}", pg,
-		       object, md->os.oi.version);
-	      version_map->emplace(object, md->os.oi.version);
-	    }
-	    return seastar::now();
-	  }, PGBackend::load_metadata_ertr::assert_all{});
-	}
-      });
-    }).then_interruptible([FNAME, version_map, start=std::move(start),
-			  next=std::move(next), this] {
-      BackfillInterval bi;
-      bi.begin = std::move(start);
-      bi.end = std::move(next);
-      bi.objects = std::move(*version_map);
-      DEBUGDPP("{} BackfillInterval filled, leaving, {}",
-	       "scan_for_backfill",
-	       pg, bi);
-      return seastar::make_ready_future<BackfillInterval>(std::move(bi));
-    });
-  });
+  auto version_map = seastar::make_lw_shared<std::map<hobject_t,
+						      eversion_t>>();
+  auto&& [objects, next] = co_await backend->list_objects(start, max);
+  co_await interruptor::parallel_for_each(objects,
+    seastar::coroutine::lambda([FNAME, this, version_map]
+    (const hobject_t& object) -> interruptible_future<> {
+    DEBUGDPP("querying obj:{}", pg, object);
+    auto obc_manager = pg.obc_loader.get_obc_manager(
+      object, /* resolve_clone = */ false);
+
+    auto found = co_await pg.obc_loader.load_and_lock(
+      obc_manager, RWState::RWREAD
+    ).si_then([] {
+      return true;
+    }).handle_error_interruptible(
+      crimson::ct_error::enoent::handle([](auto) {
+	return false;
+      }),
+      crimson::ct_error::assert_all(fmt::format("{} {} error when loading obc", pg, FNAME).c_str())
+    );
+    if (!found) {
+      // if the object does not exist here, it must have been removed
+      // between the collection_list_partial and here.  This can happen
+      // for the first item in the range, which is usually last_backfill.
+      co_return;
+    }
+
+    if (obc_manager.get_obc()->obs.exists) {
+      auto version = obc_manager.get_obc()->obs.oi.version;
+      version_map->emplace(object, version);
+      DEBUGDPP("found: {}  {}", pg,
+               object, version);
+      co_return;
+    } else {
+      // if the object does not exist here, it must have been removed
+      // between the collection_list_partial and here.  This can happen
+      // for the first item in the range, which is usually last_backfill.
+      co_return;
+    }
+  }));
+  ReplicaBackfillInterval bi;
+  bi.begin = std::move(start);
+  bi.end = std::move(next);
+  bi.objects = std::move(*version_map);
+  DEBUGDPP("{} ReplicaBackfillInterval filled, leaving, {}",
+           "scan_for_backfill_replica",
+           pg, bi);
+  co_return std::move(bi);
 }
 
 RecoveryBackend::interruptible_future<>
@@ -297,7 +373,7 @@ RecoveryBackend::handle_scan_get_digest(
       PeeringState::BackfillTooFull());
     return seastar::now();
   }
-  return scan_for_backfill(
+  return scan_for_backfill_replica(
     std::move(m.begin),
     crimson::common::local_conf().get_val<std::int64_t>("osd_backfill_scan_min"),
     crimson::common::local_conf().get_val<std::int64_t>("osd_backfill_scan_max")
@@ -326,7 +402,7 @@ RecoveryBackend::handle_scan_digest(
   // Check that from is in backfill_targets vector
   ceph_assert(pg.is_backfill_target(m.from));
 
-  BackfillInterval bi;
+  ReplicaBackfillInterval bi;
   bi.begin = m.begin;
   bi.end = m.end;
   {
@@ -382,4 +458,6 @@ RecoveryBackend::handle_backfill_op(
 	std::invalid_argument(fmt::format("invalid request type: {}",
 					  (uint16_t)m->get_header().type)));
   }
+}
+
 }

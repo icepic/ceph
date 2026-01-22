@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -34,7 +35,7 @@
 #include "include/ipaddr.h"
 #include "include/str_list.h"
 #include "common/ceph_context.h"
-#ifndef WITH_SEASTAR
+#ifndef WITH_CRIMSON
 #include "common/config.h"
 #include "common/config_obs.h"
 #endif
@@ -137,7 +138,7 @@ bool matches_with_net(CephContext *cct,
 
 int grade_with_numa_node(const ifaddrs& ifa, int numa_node)
 {
-#if defined(WITH_SEASTAR) || defined(_WIN32)
+#if defined(WITH_CRIMSON) || defined(_WIN32)
   return 0;
 #else
   if (numa_node < 0) {
@@ -198,7 +199,7 @@ const struct sockaddr *find_ip_in_subnet_list(
   return best_addr;
 }
 
-#ifndef WITH_SEASTAR
+#ifndef WITH_CRIMSON
 // observe this change
 struct Observer : public md_config_obs_t {
   const std::string key;
@@ -298,7 +299,7 @@ void pick_addresses(CephContext *cct, int needs)
     }
   }
 }
-#endif	// !WITH_SEASTAR
+#endif	// !WITH_CRIMSON
 
 static std::optional<entity_addr_t> get_one_address(
   CephContext *cct,

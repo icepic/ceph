@@ -1,6 +1,7 @@
 import { Component, NgZone, OnInit, TemplateRef, ViewChild } from '@angular/core';
 
-import { forkJoin as observableForkJoin, Observable, Subscriber } from 'rxjs';
+import { forkJoin as observableForkJoin, Observable, Subscriber, Subject, of } from 'rxjs';
+import { RgwUserAccountsService } from '~/app/shared/api/rgw-user-accounts.service';
 
 import { RgwUserService } from '~/app/shared/api/rgw-user.service';
 import { ListWithDetails } from '~/app/shared/classes/list-with-details.class';
@@ -18,6 +19,9 @@ import { Permission } from '~/app/shared/models/permissions';
 import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
 import { ModalCdsService } from '~/app/shared/services/modal-cds.service';
 import { URLBuilderService } from '~/app/shared/services/url-builder.service';
+import { Account } from '../models/rgw-user-accounts';
+import { catchError, map, switchMap } from 'rxjs/operators';
+import { RgwUser } from '../models/rgw-user';
 
 const BASE_URL = 'rgw/user';
 
@@ -25,7 +29,8 @@ const BASE_URL = 'rgw/user';
   selector: 'cd-rgw-user-list',
   templateUrl: './rgw-user-list.component.html',
   styleUrls: ['./rgw-user-list.component.scss'],
-  providers: [{ provide: URLBuilderService, useValue: new URLBuilderService(BASE_URL) }]
+  providers: [{ provide: URLBuilderService, useValue: new URLBuilderService(BASE_URL) }],
+  standalone: false
 })
 export class RgwUserListComponent extends ListWithDetails implements OnInit {
   @ViewChild(TableComponent, { static: true })
@@ -34,12 +39,17 @@ export class RgwUserListComponent extends ListWithDetails implements OnInit {
   userSizeTpl: TemplateRef<any>;
   @ViewChild('userObjectTpl', { static: true })
   userObjectTpl: TemplateRef<any>;
+  @ViewChild('usernameTpl', { static: true })
+  usernameTpl: TemplateRef<any>;
   permission: Permission;
   tableActions: CdTableAction[];
   columns: CdTableColumn[] = [];
-  users: object[] = [];
+  users: RgwUser[] = [];
+  userAccounts: Account[];
   selection: CdTableSelection = new CdTableSelection();
+  userDataSubject = new Subject();
   declare staleTimeout: number;
+  icons = Icons;
 
   constructor(
     private authStorageService: AuthStorageService,
@@ -47,7 +57,8 @@ export class RgwUserListComponent extends ListWithDetails implements OnInit {
     private modalService: ModalCdsService,
     private urlBuilder: URLBuilderService,
     public actionLabels: ActionLabelsI18n,
-    protected ngZone: NgZone
+    protected ngZone: NgZone,
+    private rgwUserAccountService: RgwUserAccountsService
   ) {
     super(ngZone);
   }
@@ -58,11 +69,17 @@ export class RgwUserListComponent extends ListWithDetails implements OnInit {
       {
         name: $localize`Username`,
         prop: 'uid',
-        flexGrow: 1
+        flexGrow: 1,
+        cellTemplate: this.usernameTpl
       },
       {
         name: $localize`Tenant`,
         prop: 'tenant',
+        flexGrow: 1
+      },
+      {
+        name: $localize`Account name`,
+        prop: 'account.name',
         flexGrow: 1
       },
       {
@@ -105,6 +122,21 @@ export class RgwUserListComponent extends ListWithDetails implements OnInit {
         flexGrow: 0.8
       }
     ];
+
+    this.userDataSubject
+      .pipe(
+        switchMap((users: RgwUser[]) =>
+          this.rgwUserAccountService.list(true).pipe(
+            map((accounts: Account[]) => ({ users, accounts })),
+            catchError(() => of({ users, accounts: [] }))
+          )
+        )
+      )
+      .subscribe(({ users, accounts }) => {
+        this.userAccounts = accounts;
+        this.users = this.mapUsersWithAccount(users);
+      });
+
     const getUserUri = () =>
       this.selection.first() && `${encodeURIComponent(this.selection.first().uid)}`;
     const addAction: CdTableAction = {
@@ -134,13 +166,23 @@ export class RgwUserListComponent extends ListWithDetails implements OnInit {
   getUserList(context: CdTableFetchDataContext) {
     this.setTableRefreshTimeout();
     this.rgwUserService.list().subscribe(
-      (resp: object[]) => {
-        this.users = resp;
+      (resp: RgwUser[]) => {
+        this.userDataSubject.next(resp);
       },
       () => {
         context.error();
       }
     );
+  }
+
+  mapUsersWithAccount(users: RgwUser[]): RgwUser[] {
+    return users.map((user: RgwUser) => {
+      const account: Account = this.userAccounts.find((acc: Account) => acc.id === user.account_id);
+      return {
+        account: account ? account : { name: '' }, // adding {name: ''} for sorting account name in user list to work
+        ...user
+      };
+    });
   }
 
   updateSelection(selection: CdTableSelection) {

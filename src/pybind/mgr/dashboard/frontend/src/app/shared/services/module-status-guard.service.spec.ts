@@ -11,6 +11,7 @@ import { MgrModuleService } from '../api/mgr-module.service';
 import { ModuleStatusGuardService } from './module-status-guard.service';
 import { ToastrModule } from 'ngx-toastr';
 import { CdDatePipe } from '../pipes/cd-date.pipe';
+import { SharedModule } from '../shared.module';
 
 describe('ModuleStatusGuardService', () => {
   let service: ModuleStatusGuardService;
@@ -20,7 +21,7 @@ describe('ModuleStatusGuardService', () => {
   let ngZone: NgZone;
   let mgrModuleService: MgrModuleService;
 
-  @Component({ selector: 'cd-foo', template: '' })
+  @Component({ selector: 'cd-foo', template: '', standalone: false })
   class FooComponent {}
 
   const fakeService = {
@@ -55,7 +56,7 @@ describe('ModuleStatusGuardService', () => {
   };
 
   configureTestBed({
-    imports: [RouterTestingModule.withRoutes(routes), ToastrModule.forRoot()],
+    imports: [RouterTestingModule.withRoutes(routes), ToastrModule.forRoot(), SharedModule],
     providers: [
       ModuleStatusGuardService,
       { provide: HttpClient, useValue: fakeService },

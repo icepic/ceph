@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "include/rados/librados_fwd.hpp"
 #include "mds/mdstypes.h"
@@ -25,6 +25,7 @@ class ClsCephFSClient
       inode_backtrace_t *backtrace,
       file_layout_t *layout,
       std::string *symlink,
+      inodeno_t *remote_inode,
       AccumulateResult *result);
 
   static int delete_inode_accumulate_result(

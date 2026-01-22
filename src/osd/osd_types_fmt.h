@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #pragma once
 /**
  * \file fmtlib formatters for some osd_types.h classes
@@ -109,6 +110,9 @@ struct formatter<object_info_t> {
     if (oi.has_manifest()) {
       fmt::format_to(ctx.out(), " {}", oi.manifest);
     }
+    if (!oi.shard_versions.empty()) {
+      fmt::format_to(ctx.out(), " shard_versions={}", oi.shard_versions);
+    }
     return fmt::format_to(ctx.out(), ")");
   }
 };
@@ -132,7 +136,7 @@ struct formatter<spg_t> {
   template <typename FormatContext>
   auto format(const spg_t& spg, FormatContext& ctx) const
   {
-    if (shard_id_t::NO_SHARD == spg.shard.id) {
+    if (shard_id_t::NO_SHARD == spg.shard) {
       return fmt::format_to(ctx.out(), "{}", spg.pgid);
     } else {
       return fmt::format_to(ctx.out(), "{}s{}", spg.pgid, spg.shard.id);
@@ -253,9 +257,8 @@ struct formatter<SnapSet> {
 
     } else {
       return fmt::format_to(ctx.out(),
-			    "{}={}:{}",
+			    "{}={}",
 			    snps.seq,
-			    snps.snaps,
 			    snps.clone_snaps);
     }
   }

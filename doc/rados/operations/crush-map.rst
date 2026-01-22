@@ -1,3 +1,5 @@
+.. _rados-crush-map:
+
 ============
  CRUSH Maps
 ============
@@ -93,7 +95,7 @@ when deploying a single configuration across multiple datacenters).
 If configured, executed, and parsed successfully, the hook's output replaces
 any previously set CRUSH location.
 
-The hook hook can be enabled in ``ceph.conf`` by providing a path to an
+The hook can be enabled in the central configuration store or in the legacy ``ceph.conf`` by providing a path to an
 executable file (often a script), example::
 
    crush_location_hook = /path/to/customized-ceph-crush-location
@@ -217,6 +219,7 @@ CRUSH rules can be created via the command-line by specifying the *pool type*
 that they will govern (replicated or erasure coded), the *failure domain*, and
 optionally a *device class*.  In rare cases, CRUSH rules must be created by
 manually editing the CRUSH map.
+For more information, see :ref:`rados-crush-map-edits`.
 
 To see the rules that are defined for the cluster, run the following command:
 
@@ -430,7 +433,7 @@ Removing an OSD
 ---------------
 
 .. note:: OSDs are normally removed from the CRUSH map as a result of the
-   `ceph osd purge`` command. This command is rarely needed.
+   ``ceph osd purge`` command. This command is rarely needed.
 
 To remove an OSD from the CRUSH map of a running cluster, run a command of the
 following form:
@@ -747,10 +750,12 @@ The relevant erasure-code profile properties are as follows:
 
    ceph osd crush rule create-erasure {name} {profile-name}
 
-.. note: When creating a new pool, it is not necessary to create the rule
+.. note:: When creating a new pool, it is not necessary to create the rule
    explicitly. If only the erasure-code profile is specified and the rule
    argument is omitted, then Ceph will create the CRUSH rule automatically.
 
+
+.. _rados-crush-msr-rules:
 
 CRUSH MSR Rules
 ---------------

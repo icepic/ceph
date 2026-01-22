@@ -40,7 +40,8 @@ import { NotificationService } from '~/app/shared/services/notification.service'
 @Component({
   selector: 'cd-service-daemon-list',
   templateUrl: './service-daemon-list.component.html',
-  styleUrls: ['./service-daemon-list.component.scss']
+  styleUrls: ['./service-daemon-list.component.scss'],
+  standalone: false
 })
 export class ServiceDaemonListComponent implements OnInit, OnChanges, AfterViewInit, OnDestroy {
   @ViewChild('statusTpl', { static: true })
@@ -237,12 +238,12 @@ export class ServiceDaemonListComponent implements OnInit, OnChanges, AfterViewI
   getStatusClass(row: Daemon): string {
     return _.get(
       {
-        '-1': 'badge-danger',
-        '0': 'badge-warning',
-        '1': 'badge-success'
+        '-1': 'tag-danger',
+        '0': 'tag-warning',
+        '1': 'tag-success'
       },
       row.status,
-      'badge-dark'
+      'tag-dark'
     );
   }
 

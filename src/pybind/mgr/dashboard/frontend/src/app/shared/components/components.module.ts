@@ -35,9 +35,17 @@ import {
   DropdownModule,
   SelectModule,
   ComboBoxModule,
-  ProgressIndicatorModule
+  ProgressIndicatorModule,
+  PanelModule,
+  LayoutModule,
+  TilesModule,
+  PopoverModule,
+  InlineLoadingModule,
+  TagModule,
+  LinkModule
 } from 'carbon-components-angular';
-
+import EditIcon from '@carbon/icons/es/edit/20';
+import CodeIcon from '@carbon/icons/es/code/16';
 import { MotdComponent } from '~/app/shared/components/motd/motd.component';
 import { DirectivesModule } from '../directives/directives.module';
 import { PipesModule } from '../pipes/pipes.module';
@@ -63,7 +71,6 @@ import { ModalComponent } from './modal/modal.component';
 import { NotificationsSidebarComponent } from './notifications-sidebar/notifications-sidebar.component';
 import { OrchestratorDocPanelComponent } from './orchestrator-doc-panel/orchestrator-doc-panel.component';
 import { PwdExpirationNotificationComponent } from './pwd-expiration-notification/pwd-expiration-notification.component';
-import { RefreshSelectorComponent } from './refresh-selector/refresh-selector.component';
 import { SelectBadgesComponent } from './select-badges/select-badges.component';
 import { SelectComponent } from './select/select.component';
 import { SparklineComponent } from './sparkline/sparkline.component';
@@ -80,9 +87,21 @@ import { HelpTextComponent } from './help-text/help-text.component';
 import { FormAdvancedFieldsetComponent } from './form-advanced-fieldset/form-advanced-fieldset.component';
 import { UpgradableComponent } from './upgradable/upgradable.component';
 import { ProgressComponent } from './progress/progress.component';
+import { SidePanelComponent } from './side-panel/side-panel.component';
+import { ChartsModule } from '@carbon/charts-angular';
+import { InlineMessageComponent } from './inline-message/inline-message.component';
+import { IconComponent } from './icon/icon.component';
+import { DetailsCardComponent } from './details-card/details-card.component';
+import { ToastComponent } from './notification-toast/notification-toast.component';
+import { TearsheetComponent } from './tearsheet/tearsheet.component';
 
 // Icons
 import InfoIcon from '@carbon/icons/es/information/16';
+import CopyIcon from '@carbon/icons/es/copy/32';
+import downloadIcon from '@carbon/icons/es/download/16';
+import IdeaIcon from '@carbon/icons/es/idea/20';
+import CloseIcon from '@carbon/icons/es/close/16';
+import { TearsheetStepComponent } from './tearsheet-step/tearsheet-step.component';
 
 @NgModule({
   imports: [
@@ -121,7 +140,15 @@ import InfoIcon from '@carbon/icons/es/information/16';
     SelectModule,
     ComboBoxModule,
     ProgressIndicatorModule,
-    BaseChartDirective
+    BaseChartDirective,
+    PanelModule,
+    ChartsModule,
+    LayoutModule,
+    TilesModule,
+    PopoverModule,
+    InlineLoadingModule,
+    TagModule,
+    LinkModule
   ],
   declarations: [
     SparklineComponent,
@@ -138,7 +165,6 @@ import InfoIcon from '@carbon/icons/es/information/16';
     GrafanaComponent,
     SelectComponent,
     BackButtonComponent,
-    RefreshSelectorComponent,
     ConfigOptionComponent,
     AlertPanelComponent,
     FormModalComponent,
@@ -163,7 +189,14 @@ import InfoIcon from '@carbon/icons/es/information/16';
     HelpTextComponent,
     FormAdvancedFieldsetComponent,
     UpgradableComponent,
-    ProgressComponent
+    ProgressComponent,
+    SidePanelComponent,
+    IconComponent,
+    InlineMessageComponent,
+    DetailsCardComponent,
+    ToastComponent,
+    TearsheetComponent,
+    TearsheetStepComponent
   ],
   providers: [provideCharts(withDefaultRegisterables())],
   exports: [
@@ -179,7 +212,6 @@ import InfoIcon from '@carbon/icons/es/information/16';
     LanguageSelectorComponent,
     GrafanaComponent,
     SelectComponent,
-    RefreshSelectorComponent,
     ConfigOptionComponent,
     AlertPanelComponent,
     PwdExpirationNotificationComponent,
@@ -202,11 +234,26 @@ import InfoIcon from '@carbon/icons/es/information/16';
     HelpTextComponent,
     FormAdvancedFieldsetComponent,
     UpgradableComponent,
-    ProgressComponent
+    ProgressComponent,
+    SidePanelComponent,
+    IconComponent,
+    InlineMessageComponent,
+    DetailsCardComponent,
+    ToastComponent,
+    TearsheetComponent,
+    TearsheetStepComponent
   ]
 })
 export class ComponentsModule {
   constructor(private iconService: IconService) {
-    this.iconService.registerAll([InfoIcon]);
+    this.iconService.registerAll([
+      InfoIcon,
+      CopyIcon,
+      EditIcon,
+      CodeIcon,
+      downloadIcon,
+      IdeaIcon,
+      CloseIcon
+    ]);
   }
 }

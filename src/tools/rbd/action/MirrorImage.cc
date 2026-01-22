@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -412,7 +413,7 @@ int execute_status(const po::variables_map &vm,
         auto name_it = peer_mirror_uuids_to_name.find(status.mirror_uuid);
         formatter->dump_string("site_name",
           (name_it != peer_mirror_uuids_to_name.end() ? name_it->second : ""));
-        formatter->dump_string("mirror_uuids", status.mirror_uuid);
+        formatter->dump_string("mirror_uuid", status.mirror_uuid);
 
         formatter->dump_string("state", utils::mirror_image_site_status_state(
           status));

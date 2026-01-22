@@ -93,13 +93,15 @@ function(do_build_boost root_dir version)
     message(SEND_ERROR "unknown compiler: ${CMAKE_CXX_COMPILER_ID}")
   endif()
 
-  # build b2 and prepare the project-config.jam for boost
+  # prepare the project-config.jam for boost
+  set(bjam <SOURCE_DIR>/b2)
   set(configure_command
     ./bootstrap.sh --prefix=<INSTALL_DIR>
     --with-libraries=${boost_with_libs}
-    --with-toolset=${toolset})
+    --with-toolset=${toolset}
+    --with-bjam=${bjam})
 
-  set(b2 ./b2)
+  set(b2 ${bjam})
   if(BOOST_J)
     message(STATUS "BUILDING Boost Libraries at j ${BOOST_J}")
     list(APPEND b2 -j${BOOST_J})
@@ -155,14 +157,14 @@ function(do_build_boost root_dir version)
     check_boost_version("${PROJECT_SOURCE_DIR}/src/boost" ${version})
     set(source_dir
       SOURCE_DIR "${PROJECT_SOURCE_DIR}/src/boost")
-  elseif(version VERSION_GREATER 1.85)
+  elseif(version VERSION_GREATER 1.87)
     message(FATAL_ERROR "Unknown BOOST_REQUESTED_VERSION: ${version}")
   else()
     message(STATUS "boost will be downloaded...")
     # NOTE: If you change this version number make sure the package is available
     # at the three URLs below (may involve uploading to download.ceph.com)
-    set(boost_version 1.85.0)
-    set(boost_sha256 7009fe1faa1697476bdc7027703a2badb84e849b7b0baad5086b087b971f8617)
+    set(boost_version 1.87.0)
+    set(boost_sha256 af57be25cb4c4f4b413ed692fe378affb4352ea50fbe294a11ef548f4d527d89)
     string(REPLACE "." "_" boost_version_underscore ${boost_version} )
     list(APPEND boost_url
       https://download.ceph.com/qa/boost_${boost_version_underscore}.tar.bz2
@@ -183,6 +185,13 @@ function(do_build_boost root_dir version)
     BUILD_BYPRODUCTS ${Boost_LIBRARIES}
     INSTALL_COMMAND ${install_command}
     PREFIX "${root_dir}")
+  ExternalProject_Add_Step(Boost build-bjam
+    COMMAND ./tools/build/src/engine/build.sh --cxx=${CMAKE_CXX_COMPILER} ${toolset}
+    COMMAND ${CMAKE_COMMAND} -E copy ./tools/build/src/engine/b2 ${bjam}
+    DEPENDEES download
+    DEPENDERS configure
+    COMMENT "Building B2 engine.."
+    WORKING_DIRECTORY <SOURCE_DIR>)
 endfunction()
 
 set(Boost_context_DEPENDENCIES thread chrono system date_time)
@@ -214,6 +223,9 @@ macro(build_boost version)
     endif()
   endforeach()
   set(Boost_BUILD_COMPONENTS ${components})
+  # Remove the `headers` from the list of components to build as
+  # `headers` is an interface only target we add later.
+  list(REMOVE_ITEM Boost_BUILD_COMPONENTS headers)
   unset(components)
 
   foreach(c ${Boost_BUILD_COMPONENTS})
@@ -269,13 +281,18 @@ macro(build_boost version)
   endforeach()
 
   # for header-only libraries
-  add_library(Boost::boost INTERFACE IMPORTED)
-  set_target_properties(Boost::boost PROPERTIES
+  add_library(Boost::headers INTERFACE IMPORTED)
+  set_target_properties(Boost::headers PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${Boost_INCLUDE_DIRS}")
-  add_dependencies(Boost::boost Boost)
+  add_dependencies(Boost::headers Boost)
   find_package_handle_standard_args(Boost DEFAULT_MSG
     Boost_INCLUDE_DIRS Boost_LIBRARIES)
   mark_as_advanced(Boost_LIBRARIES BOOST_INCLUDE_DIRS)
+
+  add_library(Boost::boost INTERFACE IMPORTED)
+  set_property(TARGET Boost::boost APPEND PROPERTY INTERFACE_LINK_LIBRARIES
+    Boost::headers)
+ 
 endmacro()
 
 function(maybe_add_boost_dep target)
@@ -289,7 +306,7 @@ function(maybe_add_boost_dep target)
     get_filename_component(ext ${src} EXT)
     # assuming all cxx source files include boost header(s)
     if(ext MATCHES ".cc|.cpp|.cxx")
-      add_dependencies(${target} Boost::boost)
+      add_dependencies(${target} Boost::headers)
       return()
     endif()
   endforeach()
@@ -306,5 +323,8 @@ endfunction()
 
 function(add_executable target)
   _add_executable(${target} ${ARGN})
-  maybe_add_boost_dep(${target})
+  # can't add dependencies to aliases
+  if (NOT ";${ARGN};" MATCHES ";(ALIAS);")
+    maybe_add_boost_dep(${target})
+  endif()
 endfunction()

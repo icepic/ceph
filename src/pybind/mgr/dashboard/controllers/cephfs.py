@@ -4,7 +4,7 @@ import errno
 import json
 import os
 from collections import defaultdict
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import cephfs
 import cherrypy
@@ -17,7 +17,8 @@ from ..services.cephfs import CephFS as CephFS_
 from ..services.exception import handle_cephfs_error
 from ..tools import ViewCache, str_to_bool
 from . import APIDoc, APIRouter, DeletePermission, Endpoint, EndpointDoc, \
-    RESTController, UIRouter, UpdatePermission, allow_empty_body
+    ReadPermission, RESTController, UIRouter, UpdatePermission, \
+    allow_empty_body
 
 GET_QUOTAS_SCHEMA = {
     'max_bytes': (int, ''),
@@ -28,6 +29,35 @@ GET_STATFS_SCHEMA = {
     'files': (int, ''),
     'subdirs': (int, '')
 }
+
+LIST_PEERS_SCHEMA = [{
+    'uuid': ({
+        'client_name': (str, 'Ceph client name'),
+        'site_name': (str, 'Remote site name'),
+        'fs_name': (str, 'File system name'),
+    }, 'Peer ID'),
+}]
+
+DAEMON_STATUS_SCHEMA = [{
+    'daemon_id': (int, 'Daemon ID'),
+    'filesystems': ([{
+        'filesystem_id': (int, 'Filesystem ID'),
+        'name': (str, 'Filesystem name'),
+        'directory_count': (int, 'Directory count'),
+        'peers': ([{
+            'uuid': (str, 'Peer UUID'),
+            'remote': ({
+                'client_name': (str, 'Ceph client name'),
+                'cluster_name': (str, 'Remote cluster name'),
+                'fs_name': (str, 'Remote filesystem name'),
+            }, 'Remote peer information'),
+            'stats': ({
+                'failure_count': (int, 'Number of sync failures'),
+                'recovery_count': (int, 'Number of peer recoveries'),
+            }, 'Peer statistics'),
+        }], 'List of peer objects'),
+    }], 'List of filesystems on daemon'),
+}]
 
 
 # pylint: disable=R0904
@@ -42,10 +72,15 @@ class CephFS(RESTController):
         self.cephfs_clients = {}
 
     def list(self):
-        fsmap = mgr.get("fs_map")
-        return fsmap['filesystems']
+        return CephFS_.list_filesystems(all_info=True)
 
-    def create(self, name: str, service_spec: Dict[str, Any]):
+    def create(
+        self,
+        name: str,
+        service_spec: Dict[str, Any],
+        data_pool: Optional[str] = None,
+        metadata_pool: Optional[str] = None
+    ):
         service_spec_str = '1 '
         if 'labels' in service_spec['placement']:
             for label in service_spec['placement']['labels']:
@@ -56,8 +91,17 @@ class CephFS(RESTController):
                 service_spec_str += f'{host} '
             service_spec_str = service_spec_str[:-1]
 
-        error_code, _, err = mgr.remote('volumes', '_cmd_fs_volume_create', None,
-                                        {'name': name, 'placement': service_spec_str})
+        error_code, _, err = mgr.remote(
+            'volumes',
+            '_cmd_fs_volume_create',
+            None,
+            {
+                'name': name,
+                'placement': service_spec_str,
+                'data_pool': data_pool,
+                'meta_pool': metadata_pool
+            }
+        )
         if error_code != 0:
             raise RuntimeError(
                 f'Error creating volume {name} with placement {str(service_spec)}: {err}')
@@ -178,7 +222,7 @@ class CephFS(RESTController):
         for mds_name in mds_names:
             result[mds_name] = {}
             for counter in counters:
-                data = mgr.get_counter("mds", mds_name, counter)
+                data = mgr.get_unlabeled_counter("mds", mds_name, counter)
                 if data is not None:
                     result[mds_name][counter] = data[counter]
                 else:
@@ -231,10 +275,10 @@ class CephFS(RESTController):
             if daemon_info['state'] != "up:standby-replay":
                 continue
 
-            inos = mgr.get_latest("mds", daemon_info['name'], "mds_mem.ino")
-            dns = mgr.get_latest("mds", daemon_info['name'], "mds_mem.dn")
-            dirs = mgr.get_latest("mds", daemon_info['name'], "mds_mem.dir")
-            caps = mgr.get_latest("mds", daemon_info['name'], "mds_mem.cap")
+            inos = mgr.get_unlabeled_counter_latest("mds", daemon_info['name'], "mds_mem.ino")
+            dns = mgr.get_unlabeled_counter_latest("mds", daemon_info['name'], "mds_mem.dn")
+            dirs = mgr.get_unlabeled_counter_latest("mds", daemon_info['name'], "mds_mem.dir")
+            caps = mgr.get_unlabeled_counter_latest("mds", daemon_info['name'], "mds_mem.cap")
 
             activity = CephService.get_rate(
                 "mds", daemon_info['name'], "mds_log.replay")
@@ -287,16 +331,17 @@ class CephFS(RESTController):
             if up:
                 gid = mdsmap['up']["mds_{0}".format(rank)]
                 info = mdsmap['info']['gid_{0}'.format(gid)]
-                dns = mgr.get_latest("mds", info['name'], "mds_mem.dn")
-                inos = mgr.get_latest("mds", info['name'], "mds_mem.ino")
-                dirs = mgr.get_latest("mds", info['name'], "mds_mem.dir")
-                caps = mgr.get_latest("mds", info['name'], "mds_mem.cap")
+                dns = mgr.get_unlabeled_counter_latest("mds", info['name'], "mds_mem.dn")
+                inos = mgr.get_unlabeled_counter_latest("mds", info['name'], "mds_mem.ino")
+                dirs = mgr.get_unlabeled_counter_latest("mds", info['name'], "mds_mem.dir")
+                caps = mgr.get_unlabeled_counter_latest("mds", info['name'], "mds_mem.cap")
 
                 # In case rank 0 was down, look at another rank's
                 # sessionmap to get an indication of clients.
                 if rank == 0 or client_count == 0:
-                    client_count = mgr.get_latest("mds", info['name'],
-                                                  "mds_sessions.session_count")
+                    client_count = mgr.get_unlabeled_counter_latest(
+                        "mds", info["name"], "mds_sessions.session_count"
+                    )
 
                 laggy = "laggy_since" in info
 
@@ -719,6 +764,19 @@ class CephFsUi(CephFS):
         except (cephfs.PermissionError, cephfs.ObjectNotFound):  # pragma: no cover
             paths = []
         return paths
+
+    @Endpoint('GET', path='/used-pools')
+    @ReadPermission
+    def ls_used_pools(self):
+        """
+        This API is created just to list all the used pools to the UI
+        so that it can be used for different validation purposes within
+        the UI
+        """
+        pools = []
+        for fs in CephFS_.list_filesystems(all_info=True):
+            pools.extend(fs['mdsmap']['data_pools'] + [fs['mdsmap']['metadata_pool']])
+        return pools
 
 
 @APIRouter('/cephfs/subvolume', Scope.CEPHFS)
@@ -1177,3 +1235,37 @@ class CephFSSnapshotSchedule(RESTController):
             )
 
         return f'Snapshot schedule for path {path} activated successfully'
+
+
+@APIRouter('/cephfs/mirror', Scope.CEPHFS_MIRROR)
+@APIDoc("Cephfs Mirror Management API", "CephfsMirror")
+class CephFSMirror(RESTController):
+
+    @EndpointDoc("Get peers",
+                 parameters={
+                     'fs_name': (str, 'File system name'),
+                 },
+                 responses={200: LIST_PEERS_SCHEMA})
+    def list(self, fs_name: str):
+        error_code, out, err = mgr.remote('mirroring', 'snapshot_mirror_peer_list', fs_name)
+        if error_code != 0:
+            raise DashboardException(
+                msg=f'Failed to get Cephfs mirror peers: {err}',
+                code=error_code,
+                component='cephfs.mirror'
+            )
+        return json.loads(out)
+
+    @EndpointDoc("Get mirror daemon and peers information",
+                 responses={200: DAEMON_STATUS_SCHEMA})
+    @Endpoint('GET', path='/daemon-status')
+    @ReadPermission
+    def daemon_status(self):
+        error_code, out, err = mgr.remote('mirroring', 'snapshot_mirror_daemon_status')
+        if error_code != 0:
+            raise DashboardException(
+                msg=f'Failed to get Cephfs mirror daemon status: {err}',
+                code=error_code,
+                component='cephfs.mirror'
+            )
+        return json.loads(out)

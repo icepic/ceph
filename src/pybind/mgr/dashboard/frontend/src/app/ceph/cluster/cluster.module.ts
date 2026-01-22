@@ -13,9 +13,20 @@ import {
   InputModule,
   ModalModule,
   TreeviewModule,
-  ListModule
+  ListModule,
+  ToggletipModule,
+  IconModule,
+  IconService,
+  TagModule,
+  SelectModule,
+  LayoutModule,
+  NumberModule,
+  FileUploaderModule
 } from 'carbon-components-angular';
-
+import Analytics from '@carbon/icons/es/analytics/16';
+import CloseFilled from '@carbon/icons/es/close--filled/16';
+import ProgressBarRoundIcon from '@carbon/icons/es/progress-bar--round/32';
+import Connect from '@carbon/icons/es/connect/32';
 import {
   NgbActiveModal,
   NgbDatepickerModule,
@@ -78,6 +89,7 @@ import { MultiClusterFormComponent } from './multi-cluster/multi-cluster-form/mu
 import { MultiClusterListComponent } from './multi-cluster/multi-cluster-list/multi-cluster-list.component';
 import { DashboardV3Module } from '../dashboard-v3/dashboard-v3.module';
 import { MultiClusterDetailsComponent } from './multi-cluster/multi-cluster-details/multi-cluster-details.component';
+import { TextLabelListComponent } from '~/app/shared/components/text-label-list/text-label-list.component';
 
 @NgModule({
   imports: [
@@ -108,10 +120,17 @@ import { MultiClusterDetailsComponent } from './multi-cluster/multi-cluster-deta
     ButtonModule,
     InputModule,
     ModalModule,
-    ListModule
+    ListModule,
+    ToggletipModule,
+    IconModule,
+    TagModule,
+    TextLabelListComponent,
+    SelectModule,
+    LayoutModule,
+    NumberModule,
+    FileUploaderModule
   ],
   declarations: [
-    HostsComponent,
     MonitorComponent,
     ConfigurationComponent,
     OsdListComponent,
@@ -155,8 +174,13 @@ import { MultiClusterDetailsComponent } from './multi-cluster/multi-cluster-deta
     MultiClusterComponent,
     MultiClusterFormComponent,
     MultiClusterListComponent,
-    MultiClusterDetailsComponent
+    MultiClusterDetailsComponent,
+    HostsComponent
   ],
   providers: [NgbActiveModal]
 })
-export class ClusterModule {}
+export class ClusterModule {
+  constructor(private iconService: IconService) {
+    this.iconService.registerAll([Analytics, CloseFilled, ProgressBarRoundIcon, Connect]);
+  }
+}

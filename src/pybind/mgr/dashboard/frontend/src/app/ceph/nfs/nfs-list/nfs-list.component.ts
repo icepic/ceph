@@ -1,4 +1,4 @@
-import { Component, OnDestroy, OnInit, TemplateRef, ViewChild } from '@angular/core';
+import { Component, Input, OnDestroy, OnInit, TemplateRef, ViewChild } from '@angular/core';
 import { Router } from '@angular/router';
 
 import { NgbModalRef } from '@ng-bootstrap/ng-bootstrap';
@@ -36,7 +36,8 @@ export enum RgwExportType {
   selector: 'cd-nfs-list',
   templateUrl: './nfs-list.component.html',
   styleUrls: ['./nfs-list.component.scss'],
-  providers: [TaskListService]
+  providers: [TaskListService],
+  standalone: false
 })
 export class NfsListComponent extends ListWithDetails implements OnInit, OnDestroy {
   @ViewChild('nfsState')
@@ -49,6 +50,15 @@ export class NfsListComponent extends ListWithDetails implements OnInit, OnDestr
   @ViewChild('table', { static: true })
   table: TableComponent;
 
+  @ViewChild('protocolTpl', { static: true })
+  protocolTpl: TemplateRef<any>;
+
+  @ViewChild('transportTpl', { static: true })
+  transportTpl: TemplateRef<any>;
+
+  @Input() clusterId: string;
+  modalRef: NgbModalRef;
+
   columns: CdTableColumn[];
   permission: Permission;
   selection = new CdTableSelection();
@@ -58,8 +68,6 @@ export class NfsListComponent extends ListWithDetails implements OnInit, OnDestr
   tableActions: CdTableAction[];
   isDefaultCluster = false;
   fsal: SUPPORTED_FSAL;
-
-  modalRef: NgbModalRef;
 
   builders = {
     'nfs/create': (metadata: any) => {
@@ -135,7 +143,8 @@ export class NfsListComponent extends ListWithDetails implements OnInit, OnDestr
         name: this.fsal === SUPPORTED_FSAL.CEPH ? $localize`Path` : $localize`Bucket`,
         prop: 'path',
         flexGrow: 2,
-        cellTemplate: this.pathTmpl
+        cellTemplate: this.pathTmpl,
+        cellTransformation: CellTemplate.path
       },
       {
         name: $localize`Pseudo`,
@@ -157,11 +166,23 @@ export class NfsListComponent extends ListWithDetails implements OnInit, OnDestr
         name: $localize`Access Type`,
         prop: 'access_type',
         flexGrow: 2
+      },
+      {
+        name: $localize`NFS Protocol`,
+        prop: 'protocols',
+        flexGrow: 2,
+        cellTemplate: this.protocolTpl
+      },
+      {
+        name: $localize`Transports`,
+        prop: 'transports',
+        flexGrow: 2,
+        cellTemplate: this.transportTpl
       }
     ];
 
     this.taskListService.init(
-      () => this.nfsService.list(),
+      () => this.nfsService.list(this.clusterId),
       (resp) => this.prepareResponse(resp),
       (exports) => (this.exports = exports),
       () => this.onFetchError(),

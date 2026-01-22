@@ -41,7 +41,7 @@ struct OSDMapReply {
 
 struct OSDPoolGetRequest {
   std::string pool;
-  std::string var = "erasure_code_profile";
+  std::string var;
   std::string format = "json";
 
   void dump(Formatter* f) const;
@@ -49,7 +49,30 @@ struct OSDPoolGetRequest {
 };
 
 struct OSDPoolGetReply {
-  std::string erasure_code_profile;
+  std::optional<int> size;
+  std::optional<int> min_size;
+  std::optional<int> pg_num;
+  std::optional<int> pgp_num;
+  std::optional<std::string> crush_rule;
+  std::optional<bool> allow_ec_overwrites;
+  std::optional<bool> nodelete;
+  std::optional<bool> nopgchange;
+  std::optional<bool> nosizechange;
+  std::optional<bool> noscrub;
+  std::optional<bool> nodeep_scrub;
+  std::optional<std::string> erasure_code_profile;
+  std::optional<int> fast_read;
+  std::optional<bool> allow_ec_optimizations;
+
+  void dump(Formatter* f) const;
+  void decode_json(JSONObj* obj);
+};
+
+struct OSDPoolSetRequest {
+  std::string pool;
+  std::string var;
+  std::optional<std::string> val;
+  std::optional<bool> yes_i_really_mean_it = std::nullopt;
 
   void dump(Formatter* f) const;
   void decode_json(JSONObj* obj);
@@ -69,12 +92,17 @@ struct OSDECProfileGetReply {
   int crush_num_failure_domains;
   int crush_osds_per_failure_domain;
   std::string crush_root;
-  bool jerasure_per_chunk_alignment;
+  std::string plugin;
   int k;
   int m;
-  std::string plugin;
-  std::string technique;
-  std::string w;
+  std::optional<int> l;
+  std::optional<int> w;
+  std::optional<int> c;
+  std::optional<uint64_t> packetsize;
+  std::optional<std::string> technique;
+  std::optional<std::string> layers;
+  std::optional<std::string> mapping;
+  std::optional<bool> jerasure_per_chunk_alignment;
 
   void dump(Formatter* f) const;
   void decode_json(JSONObj* obj);
@@ -83,6 +111,7 @@ struct OSDECProfileGetReply {
 struct OSDECProfileSetRequest {
   std::string name;
   std::vector<std::string> profile;
+  bool force;
 
   void dump(Formatter* f) const;
   void decode_json(JSONObj* obj);
@@ -106,6 +135,17 @@ struct OSDSetRequest {
   void dump(Formatter* f) const;
   void decode_json(JSONObj* obj);
 };
+
+  struct OSDEnableApplicationRequest {
+    std::string pool;
+    std::string app;
+    std::optional<bool> yes_i_really_mean_it;
+    std::optional<std::string> key;
+    std::optional<std::string> value;
+
+    void dump(Formatter* f) const;
+    void decode_json(JSONObj* obj);
+  };
 
 // These structures are sent directly to the relevant OSD
 // rather than the monitor
@@ -183,6 +223,20 @@ struct InjectECClearErrorRequest {
     JSONDecoder::decode_json("shardid", shardid, obj);
     JSONDecoder::decode_json("type", type, obj);
   }
+};
+struct InjectECParityRead {
+  std::string pool;
+  std::string objname;
+
+  void dump(Formatter* f) const;
+  void decode_json(JSONObj* obj);
+};
+struct InjectECClearParityRead {
+  std::string pool;
+  std::string objname;
+
+  void dump(Formatter* f) const;
+  void decode_json(JSONObj* obj);
 };
 }  // namespace osd
 }  // namespace messaging

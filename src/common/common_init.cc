@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -27,7 +28,7 @@
 
 #define dout_subsys ceph_subsys_
 
-#ifndef WITH_SEASTAR
+#ifndef WITH_CRIMSON
 CephContext *common_preinit(const CephInitParameters &iparams,
 			    enum code_environment_t code_env, int flags)
 {
@@ -73,7 +74,7 @@ CephContext *common_preinit(const CephInitParameters &iparams,
   }
   return cct;
 }
-#endif	// #ifndef WITH_SEASTAR
+#endif	// #ifndef WITH_CRIMSON
 
 void complain_about_parse_error(CephContext *cct,
 				const std::string& parse_error)
@@ -84,7 +85,7 @@ void complain_about_parse_error(CephContext *cct,
   lderr(cct) << parse_error << dendl;
 }
 
-#ifndef WITH_SEASTAR
+#ifndef WITH_CRIMSON
 
 /* Please be sure that this can safely be called multiple times by the
  * same application. */
@@ -131,4 +132,4 @@ void common_init_finish(CephContext *cct)
   }
 }
 
-#endif	// #ifndef WITH_SEASTAR
+#endif	// #ifndef WITH_CRIMSON

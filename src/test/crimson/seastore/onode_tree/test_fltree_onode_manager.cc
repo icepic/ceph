@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <boost/range/combine.hpp>
 
@@ -33,7 +33,7 @@ struct onode_item_t {
     auto &ftvalue = static_cast<FLTreeOnode&>(value);
     ftvalue.update_onode_size(t, size);
     auto oroot = omap_root_t(laddr_t::from_raw_uint(id), cnt_modify,
-      value.get_metadata_hint(block_size));
+      value.get_metadata_hint(block_size), omap_type_t::OMAP);
     ftvalue.update_omap_root(t, oroot);
     validate(value);
   }

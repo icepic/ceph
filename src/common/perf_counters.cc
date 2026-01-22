@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -19,6 +20,8 @@
 #include "common/valgrind.h"
 #include "include/common_fwd.h"
 #include "include/utime.h"
+
+#include <sstream>
 
 using std::ostringstream;
 using std::make_pair;
@@ -162,7 +165,7 @@ PerfCounters::~PerfCounters()
 
 void PerfCounters::inc(int idx, uint64_t amt)
 {
-#ifndef WITH_SEASTAR
+#ifndef WITH_CRIMSON
   if (!m_cct->_conf->perf)
     return;
 #endif
@@ -181,9 +184,34 @@ void PerfCounters::inc(int idx, uint64_t amt)
   }
 }
 
+void PerfCounters::inc_with_max(int idx, uint64_t amt)
+{
+#ifndef WITH_CRIMSON
+  if (!m_cct->_conf->perf)
+    return;
+#endif
+
+  ceph_assert(idx > m_lower_bound);
+  ceph_assert(idx < m_upper_bound);
+  perf_counter_data_any_d& data(m_data[idx - m_lower_bound - 1]);
+  if (!(data.type & PERFCOUNTER_U64))
+    return;
+  if (data.type & PERFCOUNTER_LONGRUNAVG) {
+    data.avgcount++;
+    data.u64 += amt;
+    uint64_t m;
+    do {
+      m = data.max_u64_inc.load();
+    } while(amt > m && !data.max_u64_inc.compare_exchange_weak(m, amt));
+    data.avgcount2++;
+  } else {
+    data.u64 += amt;
+  }
+}
+
 void PerfCounters::dec(int idx, uint64_t amt)
 {
-#ifndef WITH_SEASTAR
+#ifndef WITH_CRIMSON
   if (!m_cct->_conf->perf)
     return;
 #endif
@@ -199,7 +227,7 @@ void PerfCounters::dec(int idx, uint64_t amt)
 
 void PerfCounters::set(int idx, uint64_t amt)
 {
-#ifndef WITH_SEASTAR
+#ifndef WITH_CRIMSON
   if (!m_cct->_conf->perf)
     return;
 #endif
@@ -223,7 +251,7 @@ void PerfCounters::set(int idx, uint64_t amt)
 
 uint64_t PerfCounters::get(int idx) const
 {
-#ifndef WITH_SEASTAR
+#ifndef WITH_CRIMSON
   if (!m_cct->_conf->perf)
     return 0;
 #endif
@@ -238,7 +266,7 @@ uint64_t PerfCounters::get(int idx) const
 
 void PerfCounters::tinc(int idx, utime_t amt)
 {
-#ifndef WITH_SEASTAR
+#ifndef WITH_CRIMSON
   if (!m_cct->_conf->perf)
     return;
 #endif
@@ -251,6 +279,32 @@ void PerfCounters::tinc(int idx, utime_t amt)
   if (data.type & PERFCOUNTER_LONGRUNAVG) {
     data.avgcount++;
     data.u64 += amt.to_nsec();
+    data.avgcount2++;
+  } else {
+    data.u64 += amt.to_nsec();
+  }
+}
+
+void PerfCounters::tinc_with_max(int idx, utime_t amt)
+{
+#ifndef WITH_CRIMSON
+  if (!m_cct->_conf->perf)
+    return;
+#endif
+
+  ceph_assert(idx > m_lower_bound);
+  ceph_assert(idx < m_upper_bound);
+  perf_counter_data_any_d& data(m_data[idx - m_lower_bound - 1]);
+  if (!(data.type & PERFCOUNTER_TIME))
+    return;
+  if (data.type & PERFCOUNTER_LONGRUNAVG) {
+    uint64_t new_m = amt.to_nsec();
+    data.avgcount++;
+    data.u64 += new_m;
+    uint64_t m;
+    do {
+      m = data.max_u64_inc.load();
+    } while(new_m > m && !data.max_u64_inc.compare_exchange_weak(m, new_m));
     data.avgcount2++;
   } else {
     data.u64 += amt.to_nsec();
@@ -259,7 +313,7 @@ void PerfCounters::tinc(int idx, utime_t amt)
 
 void PerfCounters::tinc(int idx, ceph::timespan amt)
 {
-#ifndef WITH_SEASTAR
+#ifndef WITH_CRIMSON
   if (!m_cct->_conf->perf)
     return;
 #endif
@@ -278,9 +332,35 @@ void PerfCounters::tinc(int idx, ceph::timespan amt)
   }
 }
 
+void PerfCounters::tinc_with_max(int idx, ceph::timespan amt)
+{
+#ifndef WITH_CRIMSON
+  if (!m_cct->_conf->perf)
+    return;
+#endif
+
+  ceph_assert(idx > m_lower_bound);
+  ceph_assert(idx < m_upper_bound);
+  perf_counter_data_any_d& data(m_data[idx - m_lower_bound - 1]);
+  if (!(data.type & PERFCOUNTER_TIME))
+    return;
+  if (data.type & PERFCOUNTER_LONGRUNAVG) {
+    uint64_t new_m = amt.count();
+    data.avgcount++;
+    data.u64 += new_m;
+    uint64_t m;
+    do {
+      m = data.max_u64_inc.load();
+    } while(new_m > m && !data.max_u64_inc.compare_exchange_weak(m, new_m));
+    data.avgcount2++;
+  } else {
+    data.u64 += amt.count();
+  }
+}
+
 void PerfCounters::tset(int idx, utime_t amt)
 {
-#ifndef WITH_SEASTAR
+#ifndef WITH_CRIMSON
   if (!m_cct->_conf->perf)
     return;
 #endif
@@ -297,7 +377,7 @@ void PerfCounters::tset(int idx, utime_t amt)
 
 void PerfCounters::tset(int idx, ceph::timespan amt)
 {
-#ifndef WITH_SEASTAR
+#ifndef WITH_CRIMSON
   if (!m_cct->_conf->perf)
     return;
 #endif
@@ -314,7 +394,7 @@ void PerfCounters::tset(int idx, ceph::timespan amt)
 
 utime_t PerfCounters::tget(int idx) const
 {
-#ifndef WITH_SEASTAR
+#ifndef WITH_CRIMSON
   if (!m_cct->_conf->perf)
     return utime_t();
 #endif
@@ -330,7 +410,7 @@ utime_t PerfCounters::tget(int idx) const
 
 void PerfCounters::hinc(int idx, int64_t x, int64_t y)
 {
-#ifndef WITH_SEASTAR
+#ifndef WITH_CRIMSON
   if (!m_cct->_conf->perf)
     return;
 #endif
@@ -347,7 +427,7 @@ void PerfCounters::hinc(int idx, int64_t x, int64_t y)
 
 pair<uint64_t, uint64_t> PerfCounters::get_tavg_ns(int idx) const
 {
-#ifndef WITH_SEASTAR
+#ifndef WITH_CRIMSON
   if (!m_cct->_conf->perf)
     return make_pair(0, 0);
 #endif
@@ -359,8 +439,7 @@ pair<uint64_t, uint64_t> PerfCounters::get_tavg_ns(int idx) const
     return make_pair(0, 0);
   if (!(data.type & PERFCOUNTER_LONGRUNAVG))
     return make_pair(0, 0);
-  pair<uint64_t,uint64_t> a = data.read_avg();
-  return make_pair(a.second, a.first);
+  return data.read_avg();
 }
 
 void PerfCounters::reset()
@@ -477,17 +556,27 @@ void PerfCounters::dump_formatted_generic(Formatter *f, bool schema,
     } else {
       if (d->type & PERFCOUNTER_LONGRUNAVG) {
         Formatter::ObjectSection longrunavg_section{*f, d->name};
-	pair<uint64_t,uint64_t> a = d->read_avg();
+	std::tuple<uint64_t,uint64_t,uint64_t> a = d->read_avg_ex();
 	if (d->type & PERFCOUNTER_U64) {
-	  f->dump_unsigned("avgcount", a.second);
-	  f->dump_unsigned("sum", a.first);
+	  f->dump_unsigned("sum", std::get<0>(a));
+	  f->dump_unsigned("avgcount", std::get<1>(a));
+          uint64_t max = std::get<2>(a);
+          if (max != 0) {
+	    f->dump_unsigned("max_inc", std::get<2>(a));
+          }
 	} else if (d->type & PERFCOUNTER_TIME) {
-	  f->dump_unsigned("avgcount", a.second);
+          uint64_t sum_ns = std::get<0>(a);
+          uint64_t count = std::get<1>(a);
+	  f->dump_unsigned("avgcount", count);
 	  f->dump_format_unquoted("sum", "%" PRId64 ".%09" PRId64,
-				  a.first / 1000000000ull,
-				  a.first % 1000000000ull);
-          uint64_t count = a.second;
-          uint64_t sum_ns = a.first;
+				  sum_ns / 1000000000ull,
+				  sum_ns % 1000000000ull);
+          uint64_t max_ns = std::get<2>(a);
+          if (max_ns != 0) {
+	    f->dump_format_unquoted("max_inc", "%" PRId64 ".%09" PRId64,
+				    max_ns / 1000000000ull,
+				    max_ns % 1000000000ull);
+          }
           if (count) {
             uint64_t avg_ns = sum_ns / count;
             f->dump_format_unquoted("avgtime", "%" PRId64 ".%09" PRId64,
@@ -531,7 +620,7 @@ PerfCounters::PerfCounters(CephContext *cct, const std::string &name,
     m_lower_bound(lower_bound),
     m_upper_bound(upper_bound),
     m_name(name)
-#if !defined(WITH_SEASTAR) || defined(WITH_ALIEN)
+#ifndef WITH_CRIMSON
     ,
     m_lock_name(std::string("PerfCounters::") + name.c_str()),
     m_lock(ceph::make_mutex(m_lock_name))

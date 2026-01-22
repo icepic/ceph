@@ -13,3 +13,5 @@ setuptools
 jsonpatch
 grpcio
 grpcio-tools
+jmespath
+xmltodict

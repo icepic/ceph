@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -22,9 +23,9 @@
 #include "include/types.h"
 
 #include "osd/osd_types.h"
+#include "common/RefCountedObj.h"
 #include "common/TrackedOp.h"
 #include "common/WorkQueue.h"
-#include "ObjectMap.h"
 #include "os/Transaction.h"
 
 #include <errno.h>
@@ -79,7 +80,7 @@ public:
    * @param journal path (or other descriptor) for journal (optional)
    * @param flags which filestores should check if applicable
    */
-#ifndef WITH_SEASTAR
+#ifndef WITH_CRIMSON
   static std::unique_ptr<ObjectStore> create(
     CephContext *cct,
     const std::string& type,
@@ -721,13 +722,6 @@ public:
     bool allow_eio = false ///< [in] don't assert on eio
     ) = 0;
 
-  /// Get keys defined on oid
-  virtual int omap_get_keys(
-    CollectionHandle &c,   ///< [in] Collection containing oid
-    const ghobject_t &oid, ///< [in] Object containing omap
-    std::set<std::string> *keys      ///< [out] Keys defined on oid
-    ) = 0;
-
   /// Get key values
   virtual int omap_get_values(
     CollectionHandle &c,         ///< [in] Collection containing oid
@@ -742,20 +736,6 @@ public:
     const ghobject_t &oid,   ///< [in] Object containing omap
     const std::set<std::string> &keys, ///< [in] Keys to check
     std::set<std::string> *out         ///< [out] Subset of keys defined on oid
-    ) = 0;
-
-  /**
-   * Returns an object map iterator
-   *
-   * Warning!  The returned iterator is an implicit lock on filestore
-   * operations in c.  Do not use filestore methods on c while the returned
-   * iterator is live.  (Filling in a transaction is no problem).
-   *
-   * @return iterator, null on error
-   */
-  virtual ObjectMap::ObjectMapIterator get_omap_iterator(
-    CollectionHandle &c,   ///< [in] collection
-    const ghobject_t &oid  ///< [in] object
     ) = 0;
 
   struct omap_iter_seek_t {
@@ -790,7 +770,10 @@ public:
    *                object's OMAP or till the iteration is stopped
    *                by `STOP`. Please note that if there is no such
    *                entry, `visitor` will be called 0 times.
-   * @return error code, zero on success
+   * @return  - error code (negative value) on failure,
+   *          - positive value when the iteration has been
+   *            stopped (omap_iter_ret_t::STOP) by the callable,
+   *          - 0 otherwise.
    */
   virtual int omap_iterate(
     CollectionHandle &c,

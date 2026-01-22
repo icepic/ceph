@@ -6,7 +6,7 @@ import _ from 'lodash';
 import { concat as observableConcat, forkJoin as observableForkJoin, Observable } from 'rxjs';
 
 import { RgwUserService } from '~/app/shared/api/rgw-user.service';
-import { ActionLabelsI18n, URLVerbs } from '~/app/shared/constants/app.constants';
+import { ActionLabelsI18n, URLVerbs, USER } from '~/app/shared/constants/app.constants';
 import { Icons } from '~/app/shared/enum/icons.enum';
 import { NotificationType } from '~/app/shared/enum/notification-type.enum';
 import { CdForm } from '~/app/shared/forms/cd-form';
@@ -14,7 +14,6 @@ import { CdFormBuilder } from '~/app/shared/forms/cd-form-builder';
 import { CdFormGroup } from '~/app/shared/forms/cd-form-group';
 import { CdValidators } from '~/app/shared/forms/cd-validators';
 import { FormatterService } from '~/app/shared/services/formatter.service';
-import { ModalService } from '~/app/shared/services/modal.service';
 import { NotificationService } from '~/app/shared/services/notification.service';
 import { RgwUserCapabilities } from '../models/rgw-user-capabilities';
 import { RgwUserCapability } from '../models/rgw-user-capability';
@@ -27,11 +26,17 @@ import { RgwUserSubuserModalComponent } from '../rgw-user-subuser-modal/rgw-user
 import { RgwUserSwiftKeyModalComponent } from '../rgw-user-swift-key-modal/rgw-user-swift-key-modal.component';
 import { RgwRateLimitComponent } from '../rgw-rate-limit/rgw-rate-limit.component';
 import { RgwRateLimitConfig } from '../models/rgw-rate-limit';
+import { ModalCdsService } from '~/app/shared/services/modal-cds.service';
+import { RgwUserAccountsService } from '~/app/shared/api/rgw-user-accounts.service';
+import { Account } from '../models/rgw-user-accounts';
+import { ManagedPolicyArnMap, ManagedPolicyName, RGW } from '../utils/constants';
+import { ComboBoxItem } from '~/app/shared/models/combo-box.model';
 
 @Component({
   selector: 'cd-rgw-user-form',
   templateUrl: './rgw-user-form.component.html',
-  styleUrls: ['./rgw-user-form.component.scss']
+  styleUrls: ['./rgw-user-form.component.scss'],
+  standalone: false
 })
 export class RgwUserFormComponent extends CdForm implements OnInit {
   userForm: CdFormGroup;
@@ -52,15 +57,30 @@ export class RgwUserFormComponent extends CdForm implements OnInit {
   showTenant = false;
   previousTenant: string = null;
   @ViewChild(RgwRateLimitComponent, { static: false }) rateLimitComponent!: RgwRateLimitComponent;
+  accounts: Account[] = [];
+  initialUserPolicies: string[] = [];
+  managedPolicies: ComboBoxItem[] = [
+    {
+      content: ManagedPolicyName.AmazonS3FullAccess,
+      name: ManagedPolicyArnMap[ManagedPolicyName.AmazonS3FullAccess],
+      selected: false
+    },
+    {
+      content: ManagedPolicyName.AmazonS3ReadOnlyAccess,
+      name: ManagedPolicyArnMap[ManagedPolicyName.AmazonS3ReadOnlyAccess],
+      selected: false
+    }
+  ];
 
   constructor(
     private formBuilder: CdFormBuilder,
     private route: ActivatedRoute,
     private router: Router,
     private rgwUserService: RgwUserService,
-    private modalService: ModalService,
+    private modalService: ModalCdsService,
     private notificationService: NotificationService,
-    public actionLabels: ActionLabelsI18n
+    public actionLabels: ActionLabelsI18n,
+    private rgwUserAccountService: RgwUserAccountsService
   ) {
     super();
     this.resource = $localize`user`;
@@ -77,7 +97,7 @@ export class RgwUserFormComponent extends CdForm implements OnInit {
       // General
       user_id: [
         null,
-        [Validators.required, Validators.pattern(/^[a-zA-Z0-9!@#%^&*()_-]+$/)],
+        [Validators.required, Validators.pattern(/^[a-zA-Z0-9!@#%^&*()._-]+$/)],
         this.editing
           ? []
           : [
@@ -89,7 +109,7 @@ export class RgwUserFormComponent extends CdForm implements OnInit {
       show_tenant: [this.editing],
       tenant: [
         null,
-        [Validators.pattern(/^[a-zA-Z0-9!@#%^&*()_-]+$/)],
+        [Validators.pattern(/^[a-zA-Z0-9_]+$/)],
         this.editing
           ? []
           : [
@@ -110,6 +130,9 @@ export class RgwUserFormComponent extends CdForm implements OnInit {
         [CdValidators.email],
         [CdValidators.unique(this.rgwUserService.emailExists, this.rgwUserService)]
       ],
+      account_id: [null, [this.tenantedAccountValidator.bind(this)]],
+      account_root_user: [false],
+      account_policies: [[]],
       max_buckets_mode: [1],
       max_buckets: [
         1000,
@@ -178,7 +201,6 @@ export class RgwUserFormComponent extends CdForm implements OnInit {
     // Process route parameters.
     this.route.params.subscribe((params: { uid: string }) => {
       if (!params.hasOwnProperty('uid')) {
-        this.loadingReady();
         return;
       }
       const uid = decodeURIComponent(params.uid);
@@ -186,7 +208,6 @@ export class RgwUserFormComponent extends CdForm implements OnInit {
       const observables = [];
       observables.push(this.rgwUserService.get(uid));
       observables.push(this.rgwUserService.getQuota(uid));
-      observables.push(this.rgwUserService.getUserRateLimit(uid));
       observableForkJoin(observables).subscribe(
         (resp: any[]) => {
           // Get the default values.
@@ -208,7 +229,7 @@ export class RgwUserFormComponent extends CdForm implements OnInit {
               break;
           }
           // Map the quota values.
-          ['user', 'bucket'].forEach((type) => {
+          [USER, 'bucket'].forEach((type) => {
             const quota = resp[1][type + '_quota'];
             value[type + '_quota_enabled'] = quota.enabled;
             if (quota.max_size < 0) {
@@ -232,6 +253,13 @@ export class RgwUserFormComponent extends CdForm implements OnInit {
           // Update the form.
           this.userForm.setValue(value);
 
+          if (this.userForm.getValue('account_id')) {
+            this.userForm.get('account_id').disable();
+          } else {
+            this.userForm.get('account_id').setValue(null);
+          }
+          const isAccountRoot: boolean = resp[0]['type'] !== RGW;
+          this.userForm.get('account_root_user').setValue(isAccountRoot);
           // Get the sub users.
           this.subusers = resp[0].subusers;
 
@@ -248,13 +276,69 @@ export class RgwUserFormComponent extends CdForm implements OnInit {
           });
           this.capabilities = resp[0].caps;
           this.uid = this.getUID();
-          this.loadingReady();
+          this.initialUserPolicies = resp[0].managed_user_policies ?? [];
+
+          this.managedPolicies.forEach((policy) => {
+            policy.selected = this.initialUserPolicies.includes(policy.name);
+          });
+
+          // Optionally, update form control with selected items
+          const selectedItems = this.managedPolicies.filter((p) => p.selected).map((p) => p.name);
+          this.userForm.get('account_policies')?.setValue(selectedItems);
         },
         () => {
           this.loadingError();
         }
       );
     });
+    this.rgwUserAccountService.list(true).subscribe(
+      (accounts: Account[]) => {
+        this.accounts = accounts;
+        if (!this.editing) {
+          // needed to disable checkbox on create form load
+          this.userForm.get('account_id').reset();
+        }
+        this.loadingReady();
+      },
+      () => {
+        this.loadingError();
+      }
+    );
+    this.userForm.get('account_id').valueChanges.subscribe((value) => {
+      if (!value) {
+        this.userForm
+          .get('display_name')
+          .setValidators([Validators.pattern(/^[a-zA-Z0-9!@#%^&*()._ -]+$/), Validators.required]);
+        this.userForm.get('display_name').updateValueAndValidity();
+        this.userForm.get('account_root_user').disable();
+      } else {
+        this.userForm
+          .get('display_name')
+          .setValidators([Validators.pattern(/^[\w+=,.@-]+$/), Validators.required]);
+        this.userForm.get('display_name').updateValueAndValidity();
+        this.userForm.get('account_root_user').enable();
+      }
+    });
+  }
+
+  multiSelector(event: ComboBoxItem[]) {
+    this.managedPolicies.forEach((policy) => {
+      policy.selected = !!event.find((selected) => selected.name === policy.name);
+    });
+  }
+
+  tenantedAccountValidator(control: AbstractControl): ValidationErrors | null {
+    if (this?.userForm?.getValue('tenant') && this.accounts.length > 0) {
+      const index: number = this.accounts.findIndex(
+        (account: Account) => account.id === control.value
+      );
+      if (index !== -1) {
+        return this.userForm.getValue('tenant') !== this.accounts[index].tenant
+          ? { tenantedAccount: true }
+          : null;
+      }
+    }
+    return null;
   }
 
   rateLimitFormInit(rateLimitForm: FormGroup) {
@@ -522,15 +606,15 @@ export class RgwUserFormComponent extends CdForm implements OnInit {
     if (_.isNumber(index)) {
       // Edit
       const subuser = this.subusers[index];
-      modalRef.componentInstance.setEditing();
-      modalRef.componentInstance.setValues(uid, subuser.id, subuser.permissions);
+      modalRef.setEditing();
+      modalRef.setValues(uid, subuser.id, subuser.permissions);
     } else {
       // Add
-      modalRef.componentInstance.setEditing(false);
-      modalRef.componentInstance.setValues(uid);
-      modalRef.componentInstance.setSubusers(this.subusers);
+      modalRef.setEditing(false);
+      modalRef.setValues(uid);
+      modalRef.setSubusers(this.subusers);
     }
-    modalRef.componentInstance.submitAction.subscribe((subuser: RgwUserSubuser) => {
+    modalRef.submitAction.subscribe((subuser: RgwUserSubuser) => {
       this.setSubuser(subuser, index);
     });
   }
@@ -544,14 +628,14 @@ export class RgwUserFormComponent extends CdForm implements OnInit {
     if (_.isNumber(index)) {
       // View
       const key = this.s3Keys[index];
-      modalRef.componentInstance.setViewing();
-      modalRef.componentInstance.setValues(key.user, key.access_key, key.secret_key);
+      modalRef.setViewing();
+      modalRef.setValues(key.user, key.access_key, key.secret_key);
     } else {
       // Add
       const candidates = this._getS3KeyUserCandidates();
-      modalRef.componentInstance.setViewing(false);
-      modalRef.componentInstance.setUserCandidates(candidates);
-      modalRef.componentInstance.submitAction.subscribe((key: RgwUserS3Key) => {
+      modalRef.setViewing(false);
+      modalRef.setUserCandidates(candidates);
+      modalRef.submitAction.subscribe((key: RgwUserS3Key) => {
         this.setS3Key(key);
       });
     }
@@ -564,7 +648,7 @@ export class RgwUserFormComponent extends CdForm implements OnInit {
   showSwiftKeyModal(index: number) {
     const modalRef = this.modalService.show(RgwUserSwiftKeyModalComponent);
     const key = this.swiftKeys[index];
-    modalRef.componentInstance.setValues(key.user, key.secret_key);
+    modalRef.setValues(key.user, key.secret_key);
   }
 
   /**
@@ -576,14 +660,14 @@ export class RgwUserFormComponent extends CdForm implements OnInit {
     if (_.isNumber(index)) {
       // Edit
       const cap = this.capabilities[index];
-      modalRef.componentInstance.setEditing();
-      modalRef.componentInstance.setValues(cap.type, cap.perm);
+      modalRef.setEditing();
+      modalRef.setValues(cap.type, cap.perm);
     } else {
       // Add
-      modalRef.componentInstance.setEditing(false);
-      modalRef.componentInstance.setCapabilities(this.capabilities);
+      modalRef.setEditing(false);
+      modalRef.setCapabilities(this.capabilities);
     }
-    modalRef.componentInstance.submitAction.subscribe((cap: RgwUserCapability) => {
+    modalRef.submitAction.subscribe((cap: RgwUserCapability) => {
       this.setCapability(cap, index);
     });
   }
@@ -593,11 +677,19 @@ export class RgwUserFormComponent extends CdForm implements OnInit {
    * @return {Boolean} Returns TRUE if the general user settings have been modified.
    */
   private _isGeneralDirty(): boolean {
-    return ['display_name', 'email', 'max_buckets_mode', 'max_buckets', 'system', 'suspended'].some(
-      (path) => {
-        return this.userForm.get(path).dirty;
-      }
-    );
+    return [
+      'display_name',
+      'email',
+      'max_buckets_mode',
+      'max_buckets',
+      'system',
+      'suspended',
+      'account_id',
+      'account_root_user',
+      'account_policies'
+    ].some((path) => {
+      return this.userForm.get(path).dirty;
+    });
   }
 
   /**
@@ -666,6 +758,16 @@ export class RgwUserFormComponent extends CdForm implements OnInit {
       //  0 => Unlimited bucket creation.
       _.merge(result, { max_buckets: maxBucketsMode });
     }
+    if (this.userForm.getValue('account_id')) {
+      _.merge(result, {
+        account_id: this.userForm.getValue('account_id'),
+        account_root_user: this.userForm.getValue('account_root_user')
+      });
+    }
+    const accountPolicies = this._getAccountManagedPolicies();
+    if (this.userForm.getValue('account_id') && !this.userForm.getValue('account_root_user')) {
+      _.merge(result, { account_policies: accountPolicies });
+    }
     return result;
   }
 
@@ -679,11 +781,19 @@ export class RgwUserFormComponent extends CdForm implements OnInit {
     for (const key of keys) {
       result[key] = this.userForm.getValue(key);
     }
+    if (this.userForm.getValue('account_id')) {
+      result['account_id'] = this.userForm.getValue('account_id');
+      result['account_root_user'] = this.userForm.getValue('account_root_user');
+    }
     const maxBucketsMode = parseInt(this.userForm.getValue('max_buckets_mode'), 10);
     if (_.includes([-1, 0], maxBucketsMode)) {
       // -1 => Disable bucket creation.
       //  0 => Unlimited bucket creation.
       result['max_buckets'] = maxBucketsMode;
+    }
+    const accountPolicies = this._getAccountManagedPolicies();
+    if (this.userForm.getValue('account_id') && !this.userForm.getValue('account_root_user')) {
+      result['account_policies'] = accountPolicies;
     }
     return result;
   }
@@ -694,7 +804,7 @@ export class RgwUserFormComponent extends CdForm implements OnInit {
    */
   _getUserQuotaArgs(): Record<string, any> {
     const result = {
-      quota_type: 'user',
+      quota_type: USER,
       enabled: this.userForm.getValue('user_quota_enabled'),
       max_size_kb: -1,
       max_objects: -1
@@ -758,6 +868,25 @@ export class RgwUserFormComponent extends CdForm implements OnInit {
     return result;
   }
 
+  /**
+   * Get the account managed policies to attach/detach.
+   * @returns {Object} Returns an object with attach and detach arrays.
+   */
+  private _getAccountManagedPolicies() {
+    const selectedPolicies = this.managedPolicies.filter((p) => p.selected).map((p) => p.name);
+
+    const initialPolicies = this.initialUserPolicies;
+    const toAttach = selectedPolicies.filter((p) => !initialPolicies.includes(p));
+    const toDetach = initialPolicies.filter((p) => !selectedPolicies.includes(p));
+
+    const payload = {
+      attach: toAttach,
+      detach: toDetach
+    };
+
+    return payload;
+  }
+
   onMaxBucketsModeChange(mode: string) {
     if (mode === '1') {
       // If 'Custom' mode is selected, then ensure that the form field
@@ -769,5 +898,9 @@ export class RgwUserFormComponent extends CdForm implements OnInit {
         });
       }
     }
+  }
+
+  goToCreateAccountForm() {
+    this.router.navigate(['rgw/accounts/create']);
   }
 }

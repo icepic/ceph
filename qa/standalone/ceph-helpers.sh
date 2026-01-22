@@ -1948,7 +1948,7 @@ function test_pg_scrub() {
     wait_for_clean || return 1
     pg_scrub 1.0 || return 1
     kill_daemons $dir KILL osd || return 1
-    ! TIMEOUT=2 pg_scrub 1.0 || return 1
+    ! WAIT_FOR_CLEAN_TIMEOUT=10 TIMEOUT=2 pg_scrub 1.0 || return 1
     teardown $dir || return 1
 }
 
@@ -2100,7 +2100,6 @@ function test_wait_for_scrub() {
 # @param plugin erasure code plugin
 # @return 0 on success, 1 on error
 #
-
 function erasure_code_plugin_exists() {
     local plugin=$1
     local status
@@ -2115,10 +2114,13 @@ function erasure_code_plugin_exists() {
     local status=$?
     if [ $status -eq 0 ]; then
         ceph osd erasure-code-profile rm TESTPROFILE
-    elif ! echo $s | grep --quiet "$grepstr" ; then
+    elif echo $s | grep --quiet "$grepstr" ; then
+        # expected error when the plugin doesn't exist
         status=1
-        # display why the string was rejected.
+    else
+        # any other error means plugin exists but can't initialize
         echo $s
+        status=0
     fi
     return $status
 }
@@ -2253,10 +2255,9 @@ function flush_pg_stats()
     ids=`ceph osd ls`
     seqs=''
     for osd in $ids; do
-	    seq=`ceph tell osd.$osd flush_pg_stats`
-	    if test -z "$seq"
-	    then
-		continue
+        seq=$(timeout $timeout ceph tell osd.$osd flush_pg_stats 2>/dev/null) || true
+	    if test -z "$seq"; then
+		    continue
 	    fi
 	    seqs="$seqs $osd-$seq"
     done

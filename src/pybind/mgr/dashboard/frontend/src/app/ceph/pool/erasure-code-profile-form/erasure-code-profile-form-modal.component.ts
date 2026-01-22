@@ -1,5 +1,12 @@
-import { Component, EventEmitter, OnInit, Output } from '@angular/core';
-import { Validators } from '@angular/forms';
+import {
+  ChangeDetectorRef,
+  Component,
+  EventEmitter,
+  OnInit,
+  Output,
+  ViewChild
+} from '@angular/core';
+import { FormGroupDirective, Validators } from '@angular/forms';
 
 import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap';
 
@@ -11,18 +18,22 @@ import { CdFormBuilder } from '~/app/shared/forms/cd-form-builder';
 import { CdFormGroup } from '~/app/shared/forms/cd-form-group';
 import { CdValidators } from '~/app/shared/forms/cd-validators';
 import { CrushNode } from '~/app/shared/models/crush-node';
-import { ErasureCodeProfile } from '~/app/shared/models/erasure-code-profile';
+import { ErasureCodeProfile, CrushFailureDomains } from '~/app/shared/models/erasure-code-profile';
 import { FinishedTask } from '~/app/shared/models/finished-task';
 import { TaskWrapperService } from '~/app/shared/services/task-wrapper.service';
 
 @Component({
   selector: 'cd-erasure-code-profile-form-modal',
   templateUrl: './erasure-code-profile-form-modal.component.html',
-  styleUrls: ['./erasure-code-profile-form-modal.component.scss']
+  styleUrls: ['./erasure-code-profile-form-modal.component.scss'],
+  standalone: false
 })
 export class ErasureCodeProfileFormModalComponent
   extends CrushNodeSelectionClass
   implements OnInit {
+  @ViewChild(FormGroupDirective)
+  formDir: FormGroupDirective;
+
   @Output()
   submitAction = new EventEmitter();
 
@@ -46,13 +57,17 @@ export class ErasureCodeProfileFormModalComponent
   dCalc: boolean;
   lrcGroups: number;
   lrcMultiK: number;
+  selectedCrushRoot: CrushNode;
+
+  public CrushFailureDomains = CrushFailureDomains;
 
   constructor(
     private formBuilder: CdFormBuilder,
     public activeModal: NgbActiveModal,
     private taskWrapper: TaskWrapperService,
     private ecpService: ErasureCodeProfileService,
-    public actionLabels: ActionLabelsI18n
+    public actionLabels: ActionLabelsI18n,
+    private cdr: ChangeDetectorRef
   ) {
     super();
     this.action = this.actionLabels.CREATE;
@@ -79,6 +94,7 @@ export class ErasureCodeProfileFormModalComponent
         4, // Will be overwritten with plugin defaults
         [
           Validators.required,
+          Validators.min(2),
           CdValidators.custom('max', () => this.baseValueValidation(true)),
           CdValidators.custom('unequal', (v: number) => this.lrcDataValidation(v)),
           CdValidators.custom('kLowerM', (v: number) => this.shecDataValidation(v))
@@ -86,7 +102,11 @@ export class ErasureCodeProfileFormModalComponent
       ],
       m: [
         2, // Will be overwritten with plugin defaults
-        [Validators.required, CdValidators.custom('max', () => this.baseValueValidation())]
+        [
+          Validators.required,
+          Validators.min(1),
+          CdValidators.custom('max', () => this.baseValueValidation())
+        ]
       ],
       crushFailureDomain: '', // Will be preselected
       crushNumFailureDomains: [
@@ -109,6 +129,7 @@ export class ErasureCodeProfileFormModalComponent
         3, // Will be overwritten with plugin defaults
         [
           Validators.required,
+          Validators.min(1),
           CdValidators.custom('unequal', (v: number) => this.lrcLocalityValidation(v))
         ]
       ],
@@ -137,16 +158,22 @@ export class ErasureCodeProfileFormModalComponent
     this.form
       .get('m')
       .valueChanges.subscribe(() => this.updateValidityOnChange(['k', 'l', 'c', 'd']));
-    this.form.get('l').valueChanges.subscribe(() => this.updateValidityOnChange(['k', 'm']));
+    this.form.get('l').valueChanges.subscribe(() => {
+      this.updateValidityOnChange(['k', 'm']);
+      this.form.get('l').updateValueAndValidity({ emitEvent: false });
+    });
     this.form.get('plugin').valueChanges.subscribe((plugin) => this.onPluginChange(plugin));
     this.form.get('scalar_mds').valueChanges.subscribe(() => this.setClayDefaultsForScalar());
   }
 
   private baseValueValidation(dataChunk: boolean = false): boolean {
     return this.validValidation(() => {
+      const kMSum =
+        this.form.get('crushFailureDomain').value === CrushFailureDomains.Host
+          ? this.getKMSum() + 1
+          : this.getKMSum();
       return (
-        this.getKMSum() > this.deviceCount &&
-        this.form.getValue('k') > this.form.getValue('m') === dataChunk
+        kMSum > this.deviceCount && this.form.getValue('k') > this.form.getValue('m') === dataChunk
       );
     });
   }
@@ -392,6 +419,14 @@ export class ErasureCodeProfileFormModalComponent
           this.names = names;
           this.form.silentSet('directory', directory);
           this.preValidateNumericInputFields();
+
+          setTimeout(() => {
+            const selectElement = document.getElementById('crushRoot') as any;
+            if (selectElement) {
+              selectElement.value = this.form.get('crushRoot').value;
+            }
+            this.cdr.detectChanges();
+          }, 0);
         }
       );
   }
@@ -425,7 +460,7 @@ export class ErasureCodeProfileFormModalComponent
           this.form.setErrors({ cdSubmitButton: true });
         },
         complete: () => {
-          this.activeModal.close();
+          this.closeModal();
           this.submitAction.emit(profile);
         }
       });
@@ -468,5 +503,10 @@ export class ErasureCodeProfileFormModalComponent
     };
     const value = this.form.getValue(name);
     ecp[differentApiAttributes[name] || name] = name === 'crushRoot' ? value.name : value;
+  }
+
+  onCrushFailureDomainChane() {
+    this.form.get('k').updateValueAndValidity();
+    this.form.get('m').updateValueAndValidity();
   }
 }

@@ -1,11 +1,11 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include "rgw_dmclock_scheduler.h"
 #include "rgw_dmclock_sync_scheduler.h"
 #include "rgw_dmclock_scheduler_ctx.h"
 
-#if defined(WITH_SEASTAR) && !defined(WITH_ALIEN)
+#ifdef WITH_CRIMSON
 #include "crimson/common/perf_counters_collection.h"
 #else
 #include "common/perf_counters_collection.h"

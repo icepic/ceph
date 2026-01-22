@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -1054,7 +1055,7 @@ private:
   static int check_features(MonitorDBStore *store);
 
   // config observer
-  const char** get_tracked_conf_keys() const override;
+  std::vector<std::string> get_tracked_keys() const noexcept override;
   void handle_conf_change(const ConfigProxy& conf,
                           const std::set<std::string> &changed) override;
 
@@ -1151,6 +1152,10 @@ private:
 #define CEPH_MON_FEATURE_INCOMPAT_QUINCY CompatSet::Feature(14, "quincy ondisk layout")
 #define CEPH_MON_FEATURE_INCOMPAT_REEF CompatSet::Feature(15, "reef ondisk layout")
 #define CEPH_MON_FEATURE_INCOMPAT_SQUID CompatSet::Feature(16, "squid ondisk layout")
+#define CEPH_MON_FEATURE_INCOMPAT_TENTACLE CompatSet::Feature(17, "tentacle ondisk layout")
+
+// Release-independent features
+#define CEPH_MON_FEATURE_INCOMPAT_NVMEOF_BEACON_DIFF CompatSet::Feature(32, "nvmeof beacon diff")
 // make sure you add your feature to Monitor::get_supported_features
 
 

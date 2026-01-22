@@ -22,6 +22,9 @@ import { DUE_TIMER } from '~/app/shared/forms/cd-validators';
 import { FormatterService } from '~/app/shared/services/formatter.service';
 import { RgwRateLimitComponent } from '../rgw-rate-limit/rgw-rate-limit.component';
 import { By } from '@angular/platform-browser';
+import { CheckboxModule, NumberModule, SelectModule } from 'carbon-components-angular';
+import { LoadingStatus } from '~/app/shared/forms/cd-form';
+import { USER } from '~/app/shared/constants/app.constants';
 
 describe('RgwUserFormComponent', () => {
   let component: RgwUserFormComponent;
@@ -39,7 +42,10 @@ describe('RgwUserFormComponent', () => {
       SharedModule,
       ToastrModule.forRoot(),
       NgbTooltipModule,
-      PipesModule
+      PipesModule,
+      CheckboxModule,
+      NumberModule,
+      SelectModule
     ]
   });
 
@@ -171,6 +177,13 @@ describe('RgwUserFormComponent', () => {
       formHelper.expectValid('user_id');
     }));
 
+    it('should validate that username can contain dot(.)', fakeAsync(() => {
+      spyOn(rgwUserService, 'get').and.returnValue(throwError('foo'));
+      formHelper.setValue('user_id', 'user.name', true);
+      tick(DUE_TIMER);
+      formHelper.expectValid('user_id');
+    }));
+
     it('should validate that username is invalid', fakeAsync(() => {
       spyOn(rgwUserService, 'get').and.returnValue(observableOf({}));
       formHelper.setValue('user_id', 'abc', true);
@@ -179,8 +192,27 @@ describe('RgwUserFormComponent', () => {
     }));
   });
 
+  describe('tenant validation', () => {
+    it('should validate that tenant is valid', fakeAsync(() => {
+      spyOn(rgwUserService, 'get').and.returnValue(throwError('foo'));
+      formHelper.setValue('show_tenant', true, true);
+      formHelper.setValue('tenant', 'new_tenant123', true);
+      tick(DUE_TIMER);
+      formHelper.expectValid('tenant');
+    }));
+
+    it('should validate that tenant is invalid', fakeAsync(() => {
+      spyOn(rgwUserService, 'get').and.returnValue(observableOf({}));
+      formHelper.setValue('show_tenant', true, true);
+      formHelper.setValue('tenant', 'new-tenant.dummy', true);
+      tick(DUE_TIMER);
+      formHelper.expectError('tenant', 'pattern');
+    }));
+  });
+
   describe('max buckets', () => {
     beforeEach(() => {
+      component.loading = LoadingStatus.Ready;
       fixture.detectChanges();
       childComponent = fixture.debugElement.query(By.directive(RgwRateLimitComponent))
         .componentInstance;
@@ -260,6 +292,7 @@ describe('RgwUserFormComponent', () => {
       formHelper.setValue('max_buckets_mode', 1, true);
       formHelper.setValue('max_buckets', 100, true);
       let spyRateLimit = jest.spyOn(childComponent, 'getRateLimitFormValue');
+
       component.onSubmit();
       expect(rgwUserService.create).toHaveBeenCalledWith({
         access_key: '',
@@ -297,6 +330,7 @@ describe('RgwUserFormComponent', () => {
     let notificationService: NotificationService;
 
     beforeEach(() => {
+      component.loading = LoadingStatus.Ready;
       spyOn(TestBed.inject(Router), 'navigate').and.stub();
       notificationService = TestBed.inject(NotificationService);
       spyOn(notificationService, 'show');
@@ -344,6 +378,9 @@ describe('RgwUserFormComponent', () => {
   });
 
   describe('RgwUserCapabilities', () => {
+    beforeEach(() => {
+      component.loading = LoadingStatus.Ready;
+    });
     it('capability button disabled when all capabilities are added', () => {
       component.editing = true;
       for (const capabilityType of RgwUserCapabilities.getAll()) {
@@ -408,12 +445,10 @@ describe('RgwUserFormComponent', () => {
   it('should call showCapabilityModal', () => {
     const modalShowSpy = spyOn(component['modalService'], 'show').and.callFake(() => {
       modalRef = {
-        componentInstance: {
-          setEditing: jest.fn(),
-          setValues: jest.fn(),
-          setCapabilities: jest.fn(),
-          submitAction: { subscribe: jest.fn() }
-        }
+        setEditing: jest.fn(),
+        setValues: jest.fn(),
+        setCapabilities: jest.fn(),
+        submitAction: { subscribe: jest.fn() }
       };
       return modalRef;
     });
@@ -424,9 +459,7 @@ describe('RgwUserFormComponent', () => {
   it('should call showSwiftKeyModal', () => {
     const modalShowSpy = spyOn(component['modalService'], 'show').and.callFake(() => {
       modalRef = {
-        componentInstance: {
-          setValues: jest.fn()
-        }
+        setValues: jest.fn()
       };
       return modalRef;
     });
@@ -440,12 +473,10 @@ describe('RgwUserFormComponent', () => {
   it('should call showS3KeyModal', () => {
     const modalShowSpy = spyOn(component['modalService'], 'show').and.callFake(() => {
       modalRef = {
-        componentInstance: {
-          setValues: jest.fn(),
-          setViewing: jest.fn(),
-          setUserCandidates: jest.fn(),
-          submitAction: { subscribe: jest.fn() }
-        }
+        setValues: jest.fn(),
+        setViewing: jest.fn(),
+        setUserCandidates: jest.fn(),
+        submitAction: { subscribe: jest.fn() }
       };
       return modalRef;
     });
@@ -550,7 +581,7 @@ describe('RgwUserFormComponent', () => {
 
       // Assertions
       expect(result).toEqual({
-        quota_type: 'user',
+        quota_type: USER,
         enabled: true,
         max_size_kb: -1,
         max_objects: -1
@@ -574,7 +605,7 @@ describe('RgwUserFormComponent', () => {
       const result = component._getUserQuotaArgs();
       expect(toBytesSpy).toHaveBeenCalledWith(2048);
       expect(result).toEqual({
-        quota_type: 'user',
+        quota_type: USER,
         enabled: true,
         max_size_kb: '2048', // Expect the converted KB value
         max_objects: -1
@@ -594,7 +625,7 @@ describe('RgwUserFormComponent', () => {
       const result = component._getUserQuotaArgs();
 
       expect(result).toEqual({
-        quota_type: 'user',
+        quota_type: USER,
         enabled: true,
         max_size_kb: -1,
         max_objects: 1000
@@ -605,13 +636,11 @@ describe('RgwUserFormComponent', () => {
   it('should call showSubuserModal', () => {
     const modalShowSpy = spyOn(component['modalService'], 'show').and.callFake(() => {
       modalRef = {
-        componentInstance: {
-          setValues: jest.fn(),
-          setViewing: jest.fn(),
-          setEditing: jest.fn(),
-          setUserCandidates: jest.fn(),
-          submitAction: { subscribe: jest.fn() }
-        }
+        setValues: jest.fn(),
+        setViewing: jest.fn(),
+        setEditing: jest.fn(),
+        setUserCandidates: jest.fn(),
+        submitAction: { subscribe: jest.fn() }
       };
       return modalRef;
     });
@@ -630,39 +659,35 @@ describe('RgwUserFormComponent', () => {
       ];
       let spy = spyOn(component['modalService'], 'show').and.callFake(() => {
         return (modalRef = {
-          componentInstance: {
-            setEditing: jest.fn(),
-            setValues: jest.fn(),
-            setCapabilities: jest.fn(),
-            setSubusers: jest.fn(),
-            setUserCandidates: jest.fn(),
-            submitAction: { subscribe: jest.fn() }
-          }
+          setEditing: jest.fn(),
+          setValues: jest.fn(),
+          setCapabilities: jest.fn(),
+          setSubusers: jest.fn(),
+          setUserCandidates: jest.fn(),
+          submitAction: { subscribe: jest.fn() }
         });
       });
       spyOn(component, 'getUID').and.returnValue('dashboard');
       component.showSubuserModal(index);
       expect(spy).toHaveBeenCalledTimes(1);
-      expect(modalRef.componentInstance.setEditing).toHaveBeenCalledTimes(1);
-      expect(modalRef.componentInstance.setValues).toHaveBeenCalledWith(
+      expect(modalRef.setEditing).toHaveBeenCalledTimes(1);
+      expect(modalRef.setValues).toHaveBeenCalledWith(
         'dashboard',
         component.subusers[index].id,
         component.subusers[index].permissions
       );
-      expect(modalRef.componentInstance.submitAction.subscribe).toHaveBeenCalled();
+      expect(modalRef.submitAction.subscribe).toHaveBeenCalled();
     });
 
     it('should handle "Add" scenario when index is not provided', () => {
       let spy = spyOn(component['modalService'], 'show').and.callFake(() => {
         return (modalRef = {
-          componentInstance: {
-            setEditing: jest.fn(),
-            setValues: jest.fn(),
-            setCapabilities: jest.fn(),
-            setSubusers: jest.fn(),
-            setUserCandidates: jest.fn(),
-            submitAction: { subscribe: jest.fn() }
-          }
+          setEditing: jest.fn(),
+          setValues: jest.fn(),
+          setCapabilities: jest.fn(),
+          setSubusers: jest.fn(),
+          setUserCandidates: jest.fn(),
+          submitAction: { subscribe: jest.fn() }
         });
       });
       component.subusers = [
@@ -671,10 +696,55 @@ describe('RgwUserFormComponent', () => {
       spyOn(component, 'getUID').and.returnValue('dashboard');
       component.showSubuserModal();
       expect(spy).toHaveBeenCalledTimes(1);
-      expect(modalRef.componentInstance.setEditing).toHaveBeenCalledWith(false);
-      expect(modalRef.componentInstance.setValues).toHaveBeenCalledWith('dashboard');
-      expect(modalRef.componentInstance.setSubusers).toHaveBeenCalledWith(component.subusers);
-      expect(modalRef.componentInstance.submitAction.subscribe).toHaveBeenCalled();
+      expect(modalRef.setEditing).toHaveBeenCalledWith(false);
+      expect(modalRef.setValues).toHaveBeenCalledWith('dashboard');
+      expect(modalRef.setSubusers).toHaveBeenCalledWith(component.subusers);
+      expect(modalRef.submitAction.subscribe).toHaveBeenCalled();
+    });
+  });
+
+  describe('RgwUserAccounts', () => {
+    beforeEach(() => {
+      component.loading = LoadingStatus.Ready;
+      fixture.detectChanges();
+      childComponent = fixture.debugElement.query(By.directive(RgwRateLimitComponent))
+        .componentInstance;
+    });
+    it('create with account id & account root user', () => {
+      spyOn(rgwUserService, 'create');
+      formHelper.setValue('account_id', 'RGW12312312312312312', true);
+      formHelper.setValue('account_root_user', true, true);
+      component.onSubmit();
+      expect(rgwUserService.create).toHaveBeenCalledWith({
+        access_key: '',
+        display_name: null,
+        email: '',
+        generate_key: true,
+        max_buckets: 1000,
+        secret_key: '',
+        suspended: false,
+        system: false,
+        uid: null,
+        account_id: 'RGW12312312312312312',
+        account_root_user: true
+      });
+    });
+
+    it('edit to link account to existing user', () => {
+      spyOn(rgwUserService, 'update');
+      component.editing = true;
+      formHelper.setValue('account_id', 'RGW12312312312312312', true);
+      formHelper.setValue('account_root_user', true, true);
+      component.onSubmit();
+      expect(rgwUserService.update).toHaveBeenCalledWith(null, {
+        display_name: null,
+        email: null,
+        max_buckets: 1000,
+        suspended: false,
+        system: false,
+        account_id: 'RGW12312312312312312',
+        account_root_user: true
+      });
     });
   });
 });

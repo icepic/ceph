@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -12,22 +13,20 @@
  * 
  */
 
-
-#include "MDSRank.h"
-
 #include "MDSContext.h"
+#include "MDSRank.h"
+#include "MDLog.h"
 
-#include "common/dout.h"
+#include "common/debug.h"
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_mds
 
-void MDSContext::complete(int r) {
+void MDSContext::finish(int r) {
   MDSRank *mds = get_mds();
   ceph_assert(mds != nullptr);
   ceph_assert(ceph_mutex_is_locked_by_me(mds->mds_lock));
-  dout(10) << "MDSContext::complete: " << typeid(*this).name() << dendl;
+  dout(10) << "MDSContext::finish: " << typeid(*this).name() << dendl;
   mds->heartbeat_reset();
-  return Context::complete(r);
 }
 
 void MDSInternalContextWrapper::finish(int r)

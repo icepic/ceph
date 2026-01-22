@@ -92,6 +92,7 @@ hostname: ubuntu
 status: 1
 status_desc: starting
 is_active: false
+pending_daemon_config: false
 events:
 - 2020-06-10T10:08:22.933241Z daemon:crash.ubuntu [INFO] "Deployed crash.ubuntu on
   host 'ubuntu'"
@@ -142,7 +143,7 @@ def test_handle_command():
     m = OrchestratorCli('orchestrator', 0, 0)
     r = m._handle_command(None, cmd)
     assert r == HandleCommandResult(
-        retval=-2, stdout='', stderr='No orchestrator configured (try `ceph orch set backend`)')
+        retval=2, stdout='', stderr='No orchestrator configured (try `ceph orch set backend`)')
 
 
 r = OrchResult([ServiceDescription(spec=ServiceSpec(service_type='osd'), running=123)])
@@ -171,6 +172,7 @@ def test_orch_ls(_describe_service):
         spec:
           filter_logic: AND
           objectstore: bluestore
+          termination_grace_period_seconds: 30
         status:
           running: 123
           size: 0

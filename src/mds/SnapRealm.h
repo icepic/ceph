@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,14 +16,19 @@
 #ifndef CEPH_MDS_SNAPREALM_H
 #define CEPH_MDS_SNAPREALM_H
 
+#include <map>
+#include <set>
 #include <string_view>
 
+#include "Capability.h"
 #include "mdstypes.h"
 #include "snap.h"
 #include "include/xlist.h"
 #include "include/elist.h"
 #include "common/snap_types.h"
-#include "MDSContext.h"
+
+class CInode;
+class MDCache;
 
 struct SnapRealm {
 public:
@@ -146,6 +152,8 @@ private:
   mutable ceph::buffer::list cached_snap_trace;
   mutable ceph::buffer::list cached_snap_trace_new;
   mutable inodeno_t cached_subvolume_ino = 0;
+  mutable utime_t cached_last_modified = utime_t();
+  mutable uint64_t cached_change_attr = 0;
 };
 
 std::ostream& operator<<(std::ostream& out, const SnapRealm &realm);

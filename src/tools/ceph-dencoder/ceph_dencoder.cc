@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -20,7 +21,7 @@
 
 #include "ceph_ver.h"
 #include "include/types.h"
-#include "common/Formatter.h"
+#include "common/JSONFormatter.h"
 #include "common/ceph_argparse.h"
 #include "common/errno.h"
 #include "denc_plugin.h"
@@ -274,6 +275,12 @@ int main(int argc, const char **argv)
 	return 0;
       else
 	return 1;
+    } else if (*i == string("stray_okay")) {
+      if (!den) {
+	cerr << "must first select type with 'type <name>'" << std::endl;
+	return 1;
+      }
+      den->set_stray_okay();
     } else {
       cerr << "unknown option '" << *i << "'" << std::endl;
       return 1;

@@ -1,4 +1,4 @@
-import { Component, Input, OnChanges } from '@angular/core';
+import { ChangeDetectorRef, Component, Input, OnChanges } from '@angular/core';
 
 import { RgwBucketService } from '~/app/shared/api/rgw-bucket.service';
 
@@ -8,7 +8,8 @@ import { RgwRateLimitConfig } from '../models/rgw-rate-limit';
 @Component({
   selector: 'cd-rgw-bucket-details',
   templateUrl: './rgw-bucket-details.component.html',
-  styleUrls: ['./rgw-bucket-details.component.scss']
+  styleUrls: ['./rgw-bucket-details.component.scss'],
+  standalone: false
 })
 export class RgwBucketDetailsComponent implements OnChanges {
   @Input()
@@ -24,7 +25,7 @@ export class RgwBucketDetailsComponent implements OnChanges {
   replicationStatus = $localize`Disabled`;
   bucketRateLimit: RgwRateLimitConfig;
 
-  constructor(private rgwBucketService: RgwBucketService) {}
+  constructor(private rgwBucketService: RgwBucketService, private cd: ChangeDetectorRef) {}
 
   ngOnChanges() {
     this.updateBucketDetails(this.extraxtDetailsfromResponse.bind(this));
@@ -101,5 +102,10 @@ export class RgwBucketDetailsComponent implements OnChanges {
         }
       );
     }
+  }
+
+  updateLifecycleFormatTo(format: 'json' | 'xml'): void {
+    this.lifecycleFormat = format;
+    this.cd.detectChanges();
   }
 }

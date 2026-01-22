@@ -22,6 +22,10 @@ export class RgwZonegroup {
   enabled_features: string[];
 }
 
+export interface RgwZonegroupMeta extends RgwZonegroup {
+  parent: string;
+}
+
 export class RgwZone {
   id: string;
   name: string;
@@ -51,6 +55,12 @@ export class SystemKey {
   secret_key: string;
 }
 
+export interface RgwEntities {
+  realm_name: string;
+  zonegroup_name: string;
+  zone_name: string;
+}
+
 export enum RgwMultisiteSyncPolicyStatus {
   ENABLED = 'enabled',
   FORBIDDEN = 'forbidden',
@@ -65,4 +75,9 @@ export enum FlowType {
 export interface Zone {
   added: string[];
   removed: string[];
+}
+
+export interface RgwRealmToken {
+  realm: string;
+  token: string;
 }

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -211,7 +212,7 @@ void PyModuleRegistry::active_start(
             const std::map<std::string, std::string> &kv_store,
 	    bool mon_provides_kv_sub,
             MonClient &mc, LogChannelRef clog_, LogChannelRef audit_clog_,
-            Objecter &objecter_, Client &client_, Finisher &f,
+            Objecter &objecter_, Finisher &f,
             DaemonServer &server)
 {
   std::lock_guard locker(lock);
@@ -234,7 +235,7 @@ void PyModuleRegistry::active_start(
       module_config,
       kv_store, mon_provides_kv_sub,
       ds, cs, mc,
-      clog_, audit_clog_, objecter_, client_, f, server,
+      clog_, audit_clog_, objecter_, f, server,
       *this));
 
   for (const auto &i : modules) {

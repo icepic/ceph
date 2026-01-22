@@ -56,7 +56,9 @@ describe('RgwUserDetailsComponent', () => {
       system: 'true',
       keys: [],
       swift_keys: [],
-      mfa_ids: ['testMFA1', 'testMFA2']
+      mfa_ids: ['testMFA1', 'testMFA2'],
+      type: 'rgw',
+      account: { id: 'RGW12345678901234567' }
     };
 
     component.ngOnChanges();
@@ -65,8 +67,8 @@ describe('RgwUserDetailsComponent', () => {
     const detailsTab = fixture.debugElement.nativeElement.querySelectorAll(
       '.cds--data-table--sort.cds--data-table--no-border tr td'
     );
-    expect(detailsTab[14].textContent).toEqual('MFAs(Id)');
-    expect(detailsTab[15].textContent).toEqual('testMFA1, testMFA2');
+    expect(detailsTab[16].textContent).toEqual('MFAs(Id)');
+    expect(detailsTab[17].textContent).toEqual('testMFA1, testMFA2');
   });
   it('should test updateKeysSelection', () => {
     component.selection = {
@@ -82,12 +84,10 @@ describe('RgwUserDetailsComponent', () => {
     component.keysSelection.first = () => {
       return { type: 'S3', ref: { user: '', access_key: '', secret_key: '' } };
     };
-    const modalShowSpy = spyOn(component['modalService'], 'show').and.callFake(() => {
+    const modalShowSpy = spyOn(component['cdsModalService'], 'show').and.callFake(() => {
       modalRef = {
-        componentInstance: {
-          setValues: jest.fn(),
-          setViewing: jest.fn()
-        }
+        setValues: jest.fn(),
+        setViewing: jest.fn()
       };
       return modalRef;
     });
@@ -99,12 +99,10 @@ describe('RgwUserDetailsComponent', () => {
     component.keysSelection.first = () => {
       return { type: 'Swift', ref: { user: '', access_key: '', secret_key: '' } };
     };
-    const modalShowSpy = spyOn(component['modalService'], 'show').and.callFake(() => {
+    const modalShowSpy = spyOn(component['cdsModalService'], 'show').and.callFake(() => {
       modalRef = {
-        componentInstance: {
-          setValues: jest.fn(),
-          setViewing: jest.fn()
-        }
+        setValues: jest.fn(),
+        setViewing: jest.fn()
       };
       return modalRef;
     });

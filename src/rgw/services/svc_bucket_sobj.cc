@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 
 #include "svc_bucket_sobj.h"
@@ -13,7 +13,7 @@
 #include "rgw_bucket.h"
 #include "rgw_metadata_lister.h"
 #include "rgw_string.h"
-#include "rgw_tools.h"
+#include "driver/rados/rgw_tools.h"
 #include "rgw_zone.h"
 
 #define dout_subsys ceph_subsys_rgw
@@ -526,8 +526,7 @@ int RGWSI_Bucket_SObj::remove_bucket_instance_info(const string& key,
      */
   }
 
-  return svc.mdlog->complete_entry(dpp, y, "bucket.instance",
-                                   key, objv_tracker);
+  return 0;
 }
 
 int RGWSI_Bucket_SObj::read_bucket_stats(const RGWBucketInfo& bucket_info,

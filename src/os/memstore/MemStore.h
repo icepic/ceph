@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -33,7 +34,7 @@ class MemStore : public ObjectStore {
 public:
   struct Object : public RefCountedObject {
     ceph::mutex xattr_mutex{ceph::make_mutex("MemStore::Object::xattr_mutex")};
-    ceph::mutex omap_mutex{ceph::make_mutex("MemStore::Object::omap_mutex")};
+    ceph::shared_mutex omap_mutex{ceph::make_shared_mutex("MemStore::Object::omap_mutex")};
     std::map<std::string,ceph::buffer::ptr,std::less<>> xattr;
     ceph::buffer::list omap_header;
     std::map<std::string,ceph::buffer::list> omap;
@@ -185,9 +186,6 @@ public:
   typedef Collection::Ref CollectionRef;
 
 private:
-  class OmapIteratorImpl;
-
-
   std::unordered_map<coll_t, CollectionRef> coll_map;
   /// rwlock to protect coll_map
   ceph::shared_mutex coll_lock{
@@ -349,14 +347,6 @@ public:
     bool allow_eio = false ///< [in] don't assert on eio
     ) override;
 
-  using ObjectStore::omap_get_keys;
-  /// Get keys defined on oid
-  int omap_get_keys(
-    CollectionHandle& c,              ///< [in] Collection containing oid
-    const ghobject_t &oid, ///< [in] Object containing omap
-    std::set<std::string> *keys      ///< [out] Keys defined on oid
-    ) override;
-
   using ObjectStore::omap_get_values;
   /// Get key values
   int omap_get_values(
@@ -373,12 +363,6 @@ public:
     const ghobject_t &oid,   ///< [in] Object containing omap
     const std::set<std::string> &keys, ///< [in] Keys to check
     std::set<std::string> *out         ///< [out] Subset of keys defined on oid
-    ) override;
-
-  using ObjectStore::get_omap_iterator;
-  ObjectMap::ObjectMapIterator get_omap_iterator(
-    CollectionHandle& c,              ///< [in] collection
-    const ghobject_t &oid  ///< [in] object
     ) override;
 
   int omap_iterate(

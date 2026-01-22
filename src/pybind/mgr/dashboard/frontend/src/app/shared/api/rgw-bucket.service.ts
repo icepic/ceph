@@ -250,22 +250,24 @@ export class RgwBucketService extends ApiClient {
     });
   }
 
-  setLifecycle(bucket_name: string, lifecycle: string, owner: string) {
+  setLifecycle(bucket_name: string, lifecycle: string, owner: string, tenant: string) {
     return this.rgwDaemonService.request((params: HttpParams) => {
       params = params.appendAll({
         bucket_name: bucket_name,
         lifecycle: lifecycle,
-        owner: owner
+        owner: owner,
+        tenant: tenant
       });
       return this.http.put(`${this.url}/lifecycle`, null, { params: params });
     });
   }
 
-  getLifecycle(bucket_name: string, owner: string) {
+  getLifecycle(bucket_name: string, owner: string, tenant: string) {
     return this.rgwDaemonService.request((params: HttpParams) => {
       params = params.appendAll({
         bucket_name: bucket_name,
-        owner: owner
+        owner: owner,
+        tenant: tenant
       });
       return this.http.get(`${this.url}/lifecycle`, { params: params });
     });
@@ -278,5 +280,35 @@ export class RgwBucketService extends ApiClient {
   }
   getGlobalBucketRateLimit() {
     return this.http.get(`${this.url}/ratelimit`);
+  }
+
+  listNotification(bucket_name: string) {
+    return this.rgwDaemonService.request((params: HttpParams) => {
+      params = params.appendAll({
+        bucket_name: bucket_name
+      });
+      return this.http.get(`${this.url}/notification`, { params: params });
+    });
+  }
+
+  setNotification(bucket_name: string, notification: string, owner: string) {
+    return this.rgwDaemonService.request((params: HttpParams) => {
+      params = params.appendAll({
+        bucket_name: bucket_name,
+        notification: notification,
+        owner: owner
+      });
+      return this.http.put(`${this.url}/notification`, null, { params: params });
+    });
+  }
+
+  deleteNotification(bucket_name: string, notification_id: string) {
+    return this.rgwDaemonService.request((params: HttpParams) => {
+      params = params.appendAll({
+        bucket_name: bucket_name,
+        notification_id: notification_id
+      });
+      return this.http.delete(`${this.url}/notification`, { params });
+    });
   }
 }

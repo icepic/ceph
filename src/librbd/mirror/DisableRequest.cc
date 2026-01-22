@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "librbd/mirror/DisableRequest.h"
 #include "common/dout.h"
@@ -258,7 +258,7 @@ Context *DisableRequest<I>::handle_get_clients(int *result) {
     m_ret[client.id] = 0;
 
     journal::MirrorPeerClientMeta client_meta =
-      boost::get<journal::MirrorPeerClientMeta>(client_data.client_meta);
+      std::get<journal::MirrorPeerClientMeta>(client_data.client_meta);
 
     for (const auto& sync : client_meta.sync_points) {
       send_remove_snap(client.id, sync.snap_namespace, sync.snap_name);

@@ -1,4 +1,4 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
 
 #pragma once
 
@@ -84,7 +84,7 @@ public:
     return values;
   }
   void set_config_values(const ConfigValues& val) {
-#ifndef WITH_SEASTAR
+#ifndef WITH_CRIMSON
     std::lock_guard l{lock};
 #endif
     values = val;

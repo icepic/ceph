@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -20,6 +21,7 @@
 
 
 #include "common/config.h"
+#include "common/debug.h"
 #include "SyntheticClient.h"
 #include "osdc/Objecter.h"
 #include "osdc/Filer.h"
@@ -1219,8 +1221,7 @@ int SyntheticClient::play_trace(Trace& t, string& prefix, bool metadata_only)
       const char *a = t.get_string(buf, p);
       // Client users should remember their path, but since this
       // is just a synthetic client we ignore it.
-      std::string ignore;
-      client->chdir(a, ignore, perms);
+      client->chdir(a, perms);
     } else if (strcmp(op, "statfs") == 0) {
       struct statvfs stbuf;
       client->statfs("/", &stbuf, perms);

@@ -306,6 +306,7 @@ inline namespace v14_2_0 {
     ALLOC_HINT_FLAG_LONGLIVED = 128,
     ALLOC_HINT_FLAG_COMPRESSIBLE = 256,
     ALLOC_HINT_FLAG_INCOMPRESSIBLE = 512,
+    ALLOC_HINT_FLAG_LOG = 1024,
   };
 
   /*
@@ -1472,13 +1473,13 @@ inline namespace v14_2_0 {
     int get_min_compatible_client(int8_t* min_compat_client,
                                   int8_t* require_min_compat_client);
 
-    int mon_command(std::string cmd, const bufferlist& inbl,
+    int mon_command(std::string&& cmd, bufferlist&& inbl,
 		    bufferlist *outbl, std::string *outs);
-    int mgr_command(std::string cmd, const bufferlist& inbl,
+    int mgr_command(std::string&& cmd, bufferlist&& inbl,
 		    bufferlist *outbl, std::string *outs);
-    int osd_command(int osdid, std::string cmd, const bufferlist& inbl,
+    int osd_command(int osdid, std::string&& cmd, bufferlist&& inbl,
                     bufferlist *outbl, std::string *outs);
-    int pg_command(const char *pgstr, std::string cmd, const bufferlist& inbl,
+    int pg_command(const char *pgstr, std::string&& cmd, bufferlist&& inbl,
                    bufferlist *outbl, std::string *outs);
 
     int ioctx_create(const char *name, IoCtx &pioctx);

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -115,6 +116,8 @@ struct DirStat {
 };
 
 struct InodeStat {
+  using optmetadata_singleton_client_t = optmetadata_singleton<optmetadata_client_t<std::allocator>,std::allocator>;
+
   vinodeno_t vino;
   uint32_t rdev = 0;
   version_t version = 0;
@@ -149,16 +152,23 @@ struct InodeStat {
   std::vector<uint8_t> fscrypt_auth;
   std::vector<uint8_t> fscrypt_file;
 
+  optmetadata_multiton<optmetadata_singleton_client_t,std::allocator> optmetadata;
+  inodeno_t subvolume_id;
+
  public:
   InodeStat() {}
   InodeStat(ceph::buffer::list::const_iterator& p, const uint64_t features) {
     decode(p, features);
   }
 
+  void print(std::ostream& os) const {
+    os << "InodeStat(... " << optmetadata << ")";
+  }
+
   void decode(ceph::buffer::list::const_iterator &p, const uint64_t features) {
     using ceph::decode;
     if (features == (uint64_t)-1) {
-      DECODE_START(7, p);
+      DECODE_START(9, p);
       decode(vino.ino, p);
       decode(vino.snapid, p);
       decode(rdev, p);
@@ -221,6 +231,12 @@ struct InodeStat {
         decode(fscrypt_auth, p);
         decode(fscrypt_file, p);
       }
+      if (struct_v >= 8) {
+        decode(optmetadata, p);
+      }
+       if (struct_v >= 9) {
+         decode(subvolume_id, p);
+       }
       DECODE_FINISH(p);
     }
     else {
@@ -313,11 +329,13 @@ public:
     f->dump_unsigned("created_ino", created_ino);
     f->dump_stream("delegated_inos") << delegated_inos;
   }
-  static void generate_test_instances(std::list<openc_response_t*>& ls) {
-    ls.push_back(new openc_response_t);
-    ls.push_back(new openc_response_t);
-    ls.back()->created_ino = 1;
-    ls.back()->delegated_inos.insert(1, 10);
+  static std::list<openc_response_t> generate_test_instances() {
+    std::list<openc_response_t> ls;
+    ls.emplace_back();
+    ls.emplace_back();
+    ls.back().created_ino = 1;
+    ls.back().delegated_inos.insert(1, 10);
+    return ls;
   }
 } __attribute__ ((__may_alias__));
 WRITE_CLASS_ENCODER(openc_response_t)

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -31,6 +32,7 @@
 #include "common/simple_cache.hpp"
 #include "common/PriorityCache.h"
 #include "msg/Messenger.h"
+#include "common/prime.h"
 
 #include "osd/OSDMap.h"
 #include "osd/OSDMapMapping.h"
@@ -213,7 +215,7 @@ public:
   OSDMap osdmap;
 
   // config observer
-  const char** get_tracked_conf_keys() const override;
+  std::vector<std::string> get_tracked_keys() const noexcept override;
   void handle_conf_change(const ConfigProxy& conf,
     const std::set<std::string> &changed) override;
   // [leader]
@@ -741,6 +743,10 @@ public:
       std::stringstream &ss,
       ceph::Formatter *f);
 
+  int enable_pool_ec_optimizations(pg_pool_t &pool,
+                                   std::stringstream *ss,
+                                   bool enable);
+  void enable_pool_ec_direct_reads(pg_pool_t &p);
   int prepare_command_pool_set(const cmdmap_t& cmdmap,
                                std::stringstream& ss);
 

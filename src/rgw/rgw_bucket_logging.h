@@ -1,15 +1,17 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
 
 #include <string>
 #include <cstdint>
 #include "rgw_sal_fwd.h"
+#include "rgw_bucket_types.h"
 #include "include/buffer.h"
 #include "include/encoding.h"
 #include "common/async/yield_context.h"
 #include "rgw_s3_filter.h"
+#include "rgw_arn.h"
 
 class XMLObj;
 namespace ceph { class Formatter; }
@@ -139,6 +141,8 @@ struct configuration {
 };
 WRITE_CLASS_ENCODER(configuration)
 
+static const std::string service_principal = "logging.s3.amazonaws.com";
+
 using source_buckets = std::set<rgw_bucket>;
 
 constexpr unsigned MAX_BUCKET_LOGGING_BUFFER = 1000;
@@ -157,43 +161,33 @@ inline std::string to_string(const Records& records) {
 // log a bucket logging record according to the configuration
 int log_record(rgw::sal::Driver* driver,
     const sal::Object* obj,
-    const req_state* s, 
-    const std::string& op_name, 
-    const std::string& etag, 
-    size_t size, 
+    req_state* s,
+    const std::string& op_name,
+    const std::string& etag,
+    size_t size,
     const configuration& conf,
-    const DoutPrefixProvider *dpp, 
-    optional_yield y, 
+    const DoutPrefixProvider *dpp,
+    optional_yield y,
     bool async_completion,
     bool log_source_bucket);
 
 // commit the pending log objec to the log bucket
 // and create a new pending log object
 // if "must_commit" is "false" the function will return success even if the pending log object was not committed
+// if "last_committed" is not null, it will be set to the name of the last committed object
+// optional error message is returned by reference
 int rollover_logging_object(const configuration& conf,
     const std::unique_ptr<rgw::sal::Bucket>& bucket,
     std::string& obj_name,
     const DoutPrefixProvider *dpp,
+    const std::string& region,
+    const std::unique_ptr<rgw::sal::Bucket>& source_bucket,
     optional_yield y,
     bool must_commit,
-    RGWObjVersionTracker* objv_tracker);
-
-// commit the pending log object to the log bucket
-// use this for cleanup, when new pending object is not needed
-// and target bucket is known
-int commit_logging_object(const configuration& conf,
-    const std::unique_ptr<rgw::sal::Bucket>& target_bucket,
-    const DoutPrefixProvider *dpp,
-    optional_yield y);
-
-// commit the pending log object to the log bucket
-// use this for cleanup, when new pending object is not needed
-// and target bucket shoud be loaded based on the configuration
-int commit_logging_object(const configuration& conf,
-    const DoutPrefixProvider *dpp,
-    rgw::sal::Driver* driver,
-    const std::string& tenant_name,
-    optional_yield y);
+    RGWObjVersionTracker* objv_tracker,
+    bool async,
+    std::string* last_committed,
+    std::string* err_message = nullptr);
 
 // return the oid of the object holding the name of the temporary logging object
 // bucket - log bucket
@@ -206,12 +200,12 @@ std::string object_name_oid(const rgw::sal::Bucket* bucket, const std::string& p
 int log_record(rgw::sal::Driver* driver,
     LoggingType type,
     const sal::Object* obj,
-    const req_state* s, 
-    const std::string& op_name, 
-    const std::string& etag, 
-    size_t size, 
-    const DoutPrefixProvider *dpp, 
-    optional_yield y, 
+    req_state* s,
+    const std::string& op_name,
+    const std::string& etag,
+    size_t size,
+    const DoutPrefixProvider *dpp,
+    optional_yield y,
     bool async_completion,
     bool log_source_bucket);
 
@@ -241,10 +235,45 @@ int bucket_deletion_cleanup(const DoutPrefixProvider* dpp,
 // in addition:
 // any pending log objects should be comitted to the log bucket
 // and the log bucket should be updated to remove the bucket as a source
+// if "last_committed" is not null, it will be set to the name of the last committed object
 int source_bucket_cleanup(const DoutPrefixProvider* dpp,
                                    sal::Driver* driver,
                                    sal::Bucket* bucket,
                                    bool remove_attr,
-                                   optional_yield y);
+                                   optional_yield y,
+                                   std::string* last_committed);
+
+// verify that the target bucket has the correct policy to allow the source bucket to log to it
+// note that this function adds entries to the request state environment
+// optional error message is returned by reference
+int verify_target_bucket_policy(const DoutPrefixProvider* dpp,
+    rgw::sal::Bucket* target_bucket,
+    const rgw::ARN& target_resource_arn,
+    req_state* s,
+    std::string* err_message = nullptr);
+
+// verify that target bucket does not have:
+// - bucket logging
+// - requester pays
+// - encryption
+// optional error message is returned by reference
+int verify_target_bucket_attributes(const DoutPrefixProvider* dpp,
+    rgw::sal::Bucket* target_bucket,
+    std::string* err_message = nullptr);
+
+// given a source bucket this function is parsing the configuration object
+// extracting the target bucket and load it
+// the log bucket tenant is taken from configuration
+// however, if not explicitly set there, it is taken from the tenant parameter
+// both configuration and target bucket are returned by reference
+int get_target_and_conf_from_source(
+    const DoutPrefixProvider* dpp,
+    rgw::sal::Driver* driver,
+    rgw::sal::Bucket* src_bucket,
+    const std::string& tenant,
+    configuration& configuration,
+    std::unique_ptr<rgw::sal::Bucket>& target_bucket,
+    optional_yield y);
+
 } // namespace rgw::bucketlogging
 

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -29,10 +29,9 @@ namespace ceph::os {
 }
 
 namespace crimson::osd {
-  class ShardServices;
-  class PG;
-  class ObjectContextLoader;
-}
+class ShardServices;
+class PG;
+class ObjectContextLoader;
 
 class PGBackend
 {
@@ -62,7 +61,7 @@ public:
       ::crimson::osd::IOInterruptCondition, T>;
   using rep_op_ret_t = 
     std::tuple<interruptible_future<>,
-	       interruptible_future<crimson::osd::acked_peers_t>>;
+	       interruptible_future<>>;
   using rep_op_fut_t = interruptible_future<rep_op_ret_t>;
   PGBackend(shard_id_t shard, CollectionRef coll,
             crimson::osd::ShardServices &shard_services,
@@ -517,3 +516,5 @@ private:
 
   friend class RecoveryBackend;
 };
+
+}

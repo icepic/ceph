@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -259,8 +259,8 @@ class RGWRadosList {
 
   int handle_stat_result(const DoutPrefixProvider *dpp,
 			 RGWRados::Object::Stat::Result& result,
-			 std::string& bucket_name,
-			 rgw_obj_key& obj_key,
+			 const std::string& bucket_name,
+			 const rgw_obj_key& obj_key,
 			 std::set<std::string>& obj_oids);
   int pop_and_handle_stat_op(const DoutPrefixProvider *dpp,
                              RGWObjectCtx& obj_ctx,

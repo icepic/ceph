@@ -208,7 +208,8 @@ extern const char *ceph_osd_state_name(int s);
 #define CEPH_RELEASE_QUINCY     17
 #define CEPH_RELEASE_REEF       18
 #define CEPH_RELEASE_SQUID      19
-#define CEPH_RELEASE_MAX        20  /* highest + 1 */
+#define CEPH_RELEASE_TENTACLE   20
+#define CEPH_RELEASE_MAX        21  /* highest + 1 */
 
 /*
  * The error code to return when an OSD can't handle a write
@@ -480,7 +481,11 @@ enum {
 	CEPH_OSD_FLAG_IGNORE_REDIRECT = 0x2000000,  /* ignore redirection */
 	CEPH_OSD_FLAG_RETURNVEC = 0x4000000, /* allow overall result >= 0, and return >= 0 and buffer for each op in opvec */
 	CEPH_OSD_FLAG_SUPPORTSPOOLEIO = 0x8000000,   /* client understands pool EIO flag */
+        CEPH_OSD_FLAG_EC_DIRECT_READ = 0x10000000,  /* Erasure code doing a partial read direct to OSD. */
 };
+
+// Indicates an IO which is direct-to-OSD and may not be on the primary.
+#define CEPH_OSD_FLAGS_DIRECT_READ (CEPH_OSD_FLAG_BALANCE_READS | CEPH_OSD_FLAG_LOCALIZE_READS | CEPH_OSD_FLAG_EC_DIRECT_READ)
 
 enum {
 	CEPH_OSD_OP_FLAG_EXCL = 0x1,      /* EXCL object create */
@@ -564,6 +569,7 @@ enum {
 	CEPH_OSD_ALLOC_HINT_FLAG_LONGLIVED = 128,
 	CEPH_OSD_ALLOC_HINT_FLAG_COMPRESSIBLE = 256,
 	CEPH_OSD_ALLOC_HINT_FLAG_INCOMPRESSIBLE = 512,
+	CEPH_OSD_ALLOC_HINT_FLAG_LOG = 1024,
 };
 
 const char *ceph_osd_alloc_hint_flag_name(int f);
